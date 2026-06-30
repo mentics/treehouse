@@ -146,7 +146,8 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			}
 			if opts.submodules {
 				reconcile, err := ReconcileSubmodules(SubmoduleReconcileOptions{
-					ParentPath:  wt.Path,
+					SourceRepoRoot: repoRoot,
+					ParentPath:     wt.Path,
 					State:       &state,
 					Submodules:  opts.submodulesCfg,
 					PostCreate:  postCreate,
@@ -201,8 +202,9 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 
 		if opts.submodules {
 			reconcile, err := ReconcileSubmodules(SubmoduleReconcileOptions{
-				ParentPath:  wtPath,
-				State:       &state,
+				SourceRepoRoot: repoRoot,
+				ParentPath:     wtPath,
+				State:          &state,
 				Submodules:  opts.submodulesCfg,
 				PostCreate:  postCreate,
 				HookStdout:  opts.hookStdout,

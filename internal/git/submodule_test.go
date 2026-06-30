@@ -14,7 +14,7 @@ func TestListSubmodulesAndGitlinkCommit(t *testing.T) {
 	subDir := filepath.Join(base, "sub")
 	superDir := filepath.Join(base, "super")
 
-	mustGit(t, "", "init", "--bare", subRemote)
+	mustGit(t, "", "init", "--bare", "--initial-branch=main", subRemote)
 	mustGit(t, "", "clone", subRemote, subDir)
 	mustGit(t, subDir, "config", "user.email", "test@test.com")
 	mustGit(t, subDir, "config", "user.name", "Test")
@@ -45,6 +45,7 @@ func TestListSubmodulesAndGitlinkCommit(t *testing.T) {
 	mustGit(t, superDir, "update-index", "--add", "--cacheinfo", "160000,"+subCommit+",vendor/libfoo")
 	mustGit(t, superDir, "add", ".gitmodules")
 	mustGit(t, superDir, "commit", "-m", "add submodule")
+	mustGit(t, superDir, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "vendor/libfoo")
 
 	subs, err := ListSubmodules(superDir)
 	if err != nil {
@@ -66,14 +67,13 @@ func TestListSubmodulesAndGitlinkCommit(t *testing.T) {
 	}
 }
 
-func TestEnsureBareRepoAndWorktreeAtRef(t *testing.T) {
+func TestResolveSubmoduleRepoDir(t *testing.T) {
 	base := t.TempDir()
 	subRemote := filepath.Join(base, "sub-remote.git")
 	subDir := filepath.Join(base, "sub")
-	cachePath := filepath.Join(base, "cache", "libfoo.git")
-	wtPath := filepath.Join(base, "worktree")
+	superDir := filepath.Join(base, "super")
 
-	mustGit(t, "", "init", "--bare", subRemote)
+	mustGit(t, "", "init", "--bare", "--initial-branch=main", subRemote)
 	mustGit(t, "", "clone", subRemote, subDir)
 	mustGit(t, subDir, "config", "user.email", "test@test.com")
 	mustGit(t, subDir, "config", "user.name", "Test")
@@ -85,16 +85,46 @@ func TestEnsureBareRepoAndWorktreeAtRef(t *testing.T) {
 	commit := strings.TrimSpace(gitOutput(t, subDir, "rev-parse", "HEAD"))
 	mustGit(t, subDir, "push", "origin", "main")
 
-	if err := EnsureBareRepo(subRemote, cachePath); err != nil {
-		t.Fatalf("EnsureBareRepo: %v", err)
+	mustGit(t, "", "init", "--initial-branch=main", superDir)
+	mustGit(t, superDir, "config", "user.email", "test@test.com")
+	mustGit(t, superDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(superDir, "README.md"), []byte("super\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if err := EnsureBareRepo(subRemote, cachePath); err != nil {
-		t.Fatalf("EnsureBareRepo idempotent: %v", err)
+	mustGit(t, superDir, "add", ".")
+	mustGit(t, superDir, "commit", "-m", "super initial")
+
+	gitmodules := `[submodule "libfoo"]
+	path = vendor/libfoo
+	url = ` + subRemote + `
+`
+	if err := os.WriteFile(filepath.Join(superDir, ".gitmodules"), []byte(gitmodules), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if err := FetchRepo(cachePath); err != nil {
-		t.Fatalf("FetchRepo: %v", err)
+	mustGit(t, superDir, "update-index", "--add", "--cacheinfo", "160000,"+commit+",vendor/libfoo")
+	mustGit(t, superDir, "add", ".gitmodules")
+	mustGit(t, superDir, "commit", "-m", "add submodule")
+
+	_, err := ResolveSubmoduleRepoDir(superDir, "vendor/libfoo")
+	if err == nil || !strings.Contains(err.Error(), "not initialized") {
+		t.Fatalf("expected not initialized error, got %v", err)
 	}
-	if err := AddWorktreeAtRef(cachePath, wtPath, commit); err != nil {
+
+	mustGit(t, superDir, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "vendor/libfoo")
+
+	backing, err := ResolveSubmoduleRepoDir(superDir, "vendor/libfoo")
+	if err != nil {
+		t.Fatalf("ResolveSubmoduleRepoDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(backing, "HEAD")); err != nil {
+		t.Fatalf("backing repo missing HEAD: %v", err)
+	}
+
+	wtPath := filepath.Join(base, "slot", "vendor", "libfoo")
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddWorktreeAtRef(backing, wtPath, commit); err != nil {
 		t.Fatalf("AddWorktreeAtRef: %v", err)
 	}
 

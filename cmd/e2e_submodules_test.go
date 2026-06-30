@@ -62,8 +62,17 @@ func setupSuperprojectWithSubmodules(t *testing.T) (superDir, homeDir, subRemote
 	gitCmd(t, superDir, "add", ".gitmodules")
 	gitCmd(t, superDir, "commit", "-m", "add submodule")
 	gitCmd(t, superDir, "push", "-u", "origin", "main")
+	gitCmd(t, superDir, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "vendor/libfoo")
 
 	return superDir, homeDir, subRemote, subCommit
+}
+
+func setupSuperprojectWithUninitializedSubmodules(t *testing.T) (superDir, homeDir string) {
+	t.Helper()
+	superDir, homeDir, _, _ = setupSuperprojectWithSubmodules(t)
+	// Remove initialized checkout while keeping gitlink in history.
+	gitCmd(t, superDir, "submodule", "deinit", "-f", "vendor/libfoo")
+	return superDir, homeDir
 }
 
 func writeSubmoduleUserConfig(t *testing.T, homeDir string) {
@@ -100,13 +109,15 @@ func TestGetSubmodules_CreatesChildWorktree(t *testing.T) {
 		t.Fatalf("expected submodule at gitlink %s, got %s", subCommit, head)
 	}
 
-	cacheRoot := filepath.Join(homeDir, ".treehouse", "repos", "submodules")
-	entries, err := os.ReadDir(cacheRoot)
-	if err != nil {
-		t.Fatalf("expected backing repo cache: %v", err)
+	sourceBacking := gitCmd(t, filepath.Join(superDir, "vendor", "libfoo"), "rev-parse", "--git-common-dir")
+	slotBacking := gitCmd(t, childPath, "rev-parse", "--git-common-dir")
+	if filepath.Clean(sourceBacking) != filepath.Clean(slotBacking) {
+		t.Fatalf("expected slot submodule to share source backing repo, got %q vs %q", slotBacking, sourceBacking)
 	}
-	if len(entries) == 0 {
-		t.Fatal("expected backing repo in cache")
+
+	cacheRoot := filepath.Join(homeDir, ".treehouse", "repos", "submodules")
+	if _, err := os.Stat(cacheRoot); err == nil {
+		t.Fatal("expected no hidden submodule cache directory")
 	}
 	_ = subRemote
 }
@@ -250,5 +261,17 @@ func TestGetSubmodules_RecursiveRejected(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "recursive") {
 		t.Fatalf("expected recursive rejection message, got: %s", stderr)
+	}
+}
+
+func TestGetSubmodules_RequiresInitializedSubmodule(t *testing.T) {
+	superDir, homeDir := setupSuperprojectWithUninitializedSubmodules(t)
+
+	_, stderr, code := runTreehouse(t, superDir, homeDir, nil, "get", "--lease", "--submodules")
+	if code == 0 {
+		t.Fatal("expected get to fail when submodule is not initialized in source repo")
+	}
+	if !strings.Contains(stderr, "not initialized") {
+		t.Fatalf("expected not initialized error, got: %s", stderr)
 	}
 }

@@ -1,7 +1,6 @@
 package pool
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -54,14 +53,15 @@ func removeChildEntry(state *State, childPath string) {
 
 // SubmoduleReconcileOptions controls submodule preparation for a parent worktree.
 type SubmoduleReconcileOptions struct {
-	ParentPath  string
-	State       *State
-	Submodules  config.SubmodulesConfig
-	PostCreate  []string
-	HookStdout  io.Writer
-	HookStderr  io.Writer
-	OnAcquire   bool
-	SetupBanner io.Writer
+	SourceRepoRoot string
+	ParentPath     string
+	State          *State
+	Submodules     config.SubmodulesConfig
+	PostCreate     []string
+	HookStdout     io.Writer
+	HookStderr     io.Writer
+	OnAcquire      bool
+	SetupBanner    io.Writer
 }
 
 // SubmoduleReconcileResult captures work done during reconciliation.
@@ -91,12 +91,9 @@ func ReconcileSubmodules(opts SubmoduleReconcileOptions) (SubmoduleReconcileResu
 		childPath := filepath.Join(opts.ParentPath, sm.Path)
 		existing := findChild(*opts.State, opts.ParentPath, sm.Path)
 
-		backingPath, createdBacking, err := ensureBackingRepo(sm.URL)
+		backingPath, err := resolveBackingRepo(opts.SourceRepoRoot, sm.Path)
 		if err != nil {
 			return SubmoduleReconcileResult{}, fmt.Errorf("submodule %s: %w", sm.Path, err)
-		}
-		if createdBacking {
-			result.SetupPerformed = true
 		}
 		if err := fetchBackingRepo(backingPath, opts.Submodules.Fetch, opts.OnAcquire); err != nil {
 			return SubmoduleReconcileResult{}, fmt.Errorf("submodule %s fetch: %w", sm.Path, err)
@@ -412,121 +409,8 @@ func DirtySubmodules(state State, parentPath string) []string {
 	return dirty
 }
 
-// --- backing repo cache ---
-
-type submoduleRegistry struct {
-	Entries []submoduleRegistryEntry `json:"entries"`
-}
-
-type submoduleRegistryEntry struct {
-	URL  string `json:"url"`
-	Path string `json:"path"`
-}
-
-func submoduleRegistryPath(cacheRoot string) string {
-	return filepath.Join(cacheRoot, "registry.json")
-}
-
-func submoduleRegistryLockPath(cacheRoot string) string {
-	return filepath.Join(cacheRoot, "registry.json.lock")
-}
-
-func ensureBackingRepo(url string) (path string, created bool, err error) {
-	cacheRoot, err := config.ResolveSubmoduleCacheRoot()
-	if err != nil {
-		return "", false, err
-	}
-	if err := os.MkdirAll(cacheRoot, 0755); err != nil {
-		return "", false, err
-	}
-
-	canonical := config.CanonicalSubmoduleURL(url)
-	backingPath := config.BackingRepoPath(cacheRoot, url)
-
-	var createdBacking bool
-	err = withSubmoduleRegistryLock(cacheRoot, func() error {
-		reg, err := readSubmoduleRegistry(cacheRoot)
-		if err != nil {
-			return err
-		}
-		if existing := reg.find(canonical); existing != "" {
-			backingPath = existing
-			return nil
-		}
-		if err := git.EnsureBareRepo(url, backingPath); err != nil {
-			return err
-		}
-		reg.upsert(canonical, backingPath)
-		if err := writeSubmoduleRegistry(cacheRoot, reg); err != nil {
-			return err
-		}
-		createdBacking = true
-		return nil
-	})
-	if err != nil {
-		return "", false, err
-	}
-	return backingPath, createdBacking, nil
-}
-
-func (r *submoduleRegistry) find(url string) string {
-	for _, e := range r.Entries {
-		if e.URL == url {
-			return e.Path
-		}
-	}
-	return ""
-}
-
-func (r *submoduleRegistry) upsert(url, path string) {
-	for i := range r.Entries {
-		if r.Entries[i].URL == url {
-			r.Entries[i].Path = path
-			return
-		}
-	}
-	r.Entries = append(r.Entries, submoduleRegistryEntry{URL: url, Path: path})
-}
-
-func readSubmoduleRegistry(cacheRoot string) (submoduleRegistry, error) {
-	path := submoduleRegistryPath(cacheRoot)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return submoduleRegistry{}, nil
-		}
-		return submoduleRegistry{}, err
-	}
-	var reg submoduleRegistry
-	if err := json.Unmarshal(data, &reg); err != nil {
-		return submoduleRegistry{}, err
-	}
-	return reg, nil
-}
-
-func writeSubmoduleRegistry(cacheRoot string, reg submoduleRegistry) error {
-	data, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(submoduleRegistryPath(cacheRoot), data, 0644)
-}
-
-func withSubmoduleRegistryLock(cacheRoot string, fn func() error) error {
-	if err := os.MkdirAll(cacheRoot, 0755); err != nil {
-		return err
-	}
-	lockPath := submoduleRegistryLockPath(cacheRoot)
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := lockFile(f); err != nil {
-		return err
-	}
-	defer unlockFile(f)
-	return fn()
+func resolveBackingRepo(sourceRepoRoot, submodulePath string) (string, error) {
+	return git.ResolveSubmoduleRepoDir(sourceRepoRoot, submodulePath)
 }
 
 func fetchBackingRepo(backingPath string, fetchPolicy string, onAcquire bool) error {

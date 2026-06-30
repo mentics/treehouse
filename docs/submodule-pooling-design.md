@@ -35,13 +35,21 @@ its submodules as Treehouse-managed child worktrees.
 
 The design has two complementary pieces:
 
-1. A shared submodule repository cache keyed by submodule URL.
+1. Reuse each submodule's existing git directory from the **source superproject
+   checkout** (the repository where the user runs `treehouse get`).
 2. Slot-affine submodule working trees kept at their real paths inside each
    superproject slot.
 
-The shared repository cache avoids repeated clones. The slot-affine working
-trees preserve the expensive local filesystem state that makes pre-warmed
-worktrees valuable.
+This mirrors how Treehouse already handles the superproject: one object store,
+many worktrees. Treehouse does **not** bare-clone submodule URLs into a hidden
+cache. Submodule paths in pool slots are additional `git worktree add` checkouts
+from the same module git directory Git created when the user initialized
+submodules in their main checkout.
+
+**Prerequisite:** submodules must be initialized in the source checkout before
+`treehouse get --submodules` (for example `git submodule update --init`). If a
+submodule is not initialized, Treehouse fails with a clear error instead of
+cloning from the network.
 
 ## Storage Layout
 
@@ -57,29 +65,25 @@ Keep the existing superproject layout:
       app/
 ```
 
-Add shared bare or mirror repositories for submodule object storage:
+Submodule object storage lives in the source repository's normal Git layout, not
+under `~/.treehouse/`:
 
 ```text
-~/.treehouse/
-  repos/
-    submodules/
-      libfoo-9d8e7f.git/
-      libbar-4c3b2a.git/
+/path/to/your/app/.git/modules/vendor/libfoo/   # backing repo (shared)
+/path/to/your/app/vendor/libfoo/                # main checkout worktree
 ```
 
-Then create each submodule worktree directly inside the parent slot:
+Pool slots add more worktrees from that same backing repo:
 
 ```text
 ~/.treehouse/
   app-a1b2c3/
     1/
       app/
-        vendor/libfoo/   # Git worktree of libfoo-9d8e7f.git
-        vendor/libbar/   # Git worktree of libbar-4c3b2a.git
+        vendor/libfoo/   # worktree of .git/modules/vendor/libfoo
     2/
       app/
         vendor/libfoo/   # separate warm worktree for slot 2
-        vendor/libbar/
 ```
 
 This is the critical warm-pool property: when slot `1` is returned, its
@@ -100,16 +104,18 @@ Whenever Treehouse creates or heals a parent slot, it should:
 1. Resolve the superproject repository and config.
 2. Read `.gitmodules` and the relevant superproject revision to discover
    submodule paths, URLs, and gitlink commits.
-3. Ensure each submodule has a shared backing repository under
-   `~/.treehouse/repos/submodules`.
+3. Resolve each submodule's backing git directory from the **source checkout**
+   by following the initialized submodule's `.git` file
+   (`git rev-parse --git-common-dir` from `sourceRepo/<path>`).
 4. Create a child worktree at the submodule path inside that parent slot if it
-   does not already exist.
+   does not already exist (`git worktree add` from the backing repo).
 5. Check each child worktree out to the gitlink commit recorded by the
    superproject.
 6. Run configured post-create hooks for newly created child worktrees.
 
 The first `treehouse get --submodules` for a cold pool may still need to create
-the missing backing repositories and child worktrees. After that initial fill,
+missing **slot** child worktrees. That is local `git worktree add` work only; it
+does not clone submodule repositories from the network. After that initial fill,
 normal acquire should reuse the warm slot-local submodule directories and only
 perform cheap checkout reconciliation.
 
@@ -223,31 +229,32 @@ type WorktreeEntry struct {
 ```
 
 The child entries can live in the parent pool state because they are slot-affine
-to the parent worktree path. The shared backing repository cache should have its
-own lightweight registry keyed by canonical submodule URL so multiple
-superprojects can reuse the same object store when appropriate.
+to the parent worktree path. `BackingRepoPath` records the resolved module git
+directory from the source checkout (typically under `.git/modules/...`).
 
 ## Git Operations
 
-Add git helpers instead of shelling out ad hoc from the orchestration layer:
+Git helpers used by the orchestration layer:
 
 - `ListSubmodules(repoRoot string) ([]Submodule, error)`
 - `SubmoduleGitlinkCommit(repoRoot, path string) (string, error)`
-- `EnsureBareRepo(remoteURL, cachePath string) error`
+- `ResolveSubmoduleRepoDir(sourceRepoRoot, submodulePath string) (string, error)`
 - `FetchRepo(repoPath string) error`
 - `AddWorktreeAtRef(repoPath, worktreePath, ref string) error`
 - `ResetWorktreeToRef(worktreePath, ref string) error`
 
 Implementation notes:
 
-- Use `git config --file .gitmodules --get-regexp` or `git submodule status`
-  only through structured helper functions.
+- Use `git config --file .gitmodules --get-regexp` only through structured helper
+  functions.
 - Prefer absolute paths internally and `filepath` helpers for Windows support.
 - Do not rely on Unix symlinks or bind mounts. They are not portable and can
   confuse Git's submodule status behavior.
-- Avoid `git submodule update --init` for the managed path. That command is
-  designed around Git's `.git/modules` layout and would recreate the clone work
-  Treehouse is trying to avoid.
+- Avoid `git submodule update --init` on **pool slot paths** (the managed path
+  inside `~/.treehouse/...`). That would clone into the slot. Initialization
+  belongs in the user's main checkout before `treehouse get --submodules`.
+- On prune/destroy, remove only slot worktree registrations. Never delete the
+  shared module git directory under `.git/modules/`.
 
 ## Handling Changed Submodule Sets
 
@@ -294,6 +301,8 @@ depend on submodules can opt in explicitly.
 
 Submodule reconciliation should fail closed:
 
+- If a submodule is not initialized in the source checkout, fail with an
+  actionable error (`git submodule update --init <path>`).
 - If a child worktree is dirty, do not hand the parent slot out as clean.
 - If the expected gitlink commit is missing from the submodule backing repo,
   fetch if allowed; otherwise mark the workspace unavailable with a clear error.
@@ -325,10 +334,11 @@ surprising deletes.
 
 Minimum test coverage should include:
 
-- Submodule-aware pool preparation creates backing repos and slot-affine child
-  worktrees.
+- Submodule-aware pool preparation resolves backing repos from the source
+  checkout and creates slot-affine child worktrees (no hidden bare clone cache).
 - A second acquire reuses the same submodule working directory and preserves an
   untracked cache file that is intentionally ignored by the submodule.
+- Acquire without initialized submodules in the source checkout fails clearly.
 - Acquire checks out the submodule to the parent gitlink commit, not the
   submodule default branch.
 - Dirty child submodules prevent parent return or reuse unless the user confirms
@@ -346,11 +356,10 @@ Minimum test coverage should include:
 - Should submodule pooling be enabled only by config, only by CLI flag, or both?
 - Should post-create hooks run for every child worktree, or should there be
   separate submodule-specific hooks?
-- Should submodule backing repositories be shared across unrelated
-  superprojects with the same URL by default?
 - Should Treehouse proactively fill all available parent slots when submodules
   are enabled, or only prepare slots as they are first created/acquired?
 
 The recommended default is explicit opt-in with automatic pool preparation. That
-keeps the user-facing model simple: enable submodules, then use `treehouse get`
-as usual while normal acquire/return cycles reuse warm submodule directories.
+keeps the user-facing model simple: initialize submodules in your main checkout,
+enable submodules, then use `treehouse get` as usual while normal acquire/return
+cycles reuse warm submodule directories.

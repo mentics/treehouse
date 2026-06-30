@@ -17,7 +17,7 @@ func TestIsRootDirtyForPoolIgnoresSubmoduleUntracked(t *testing.T) {
 	superDir := filepath.Join(base, "super")
 	parentPath := filepath.Join(base, "wt")
 
-	mustGitPool(t, "", "init", "--bare", subRemote)
+	mustGitPool(t, "", "init", "--bare", "--initial-branch=main", subRemote)
 	mustGitPool(t, "", "clone", subRemote, subDir)
 	mustGitPool(t, subDir, "config", "user.email", "t@t.com")
 	mustGitPool(t, subDir, "config", "user.name", "T")
@@ -72,7 +72,7 @@ func TestReleaseClearsLeaseWithSubmoduleChildren(t *testing.T) {
 	superDir := filepath.Join(base, "super")
 	poolDir := filepath.Join(base, "pool")
 
-	mustGitPool(t, "", "init", "--bare", subRemote)
+	mustGitPool(t, "", "init", "--bare", "--initial-branch=main", subRemote)
 	mustGitPool(t, "", "clone", subRemote, subDir)
 	mustGitPool(t, subDir, "config", "user.email", "t@t.com")
 	mustGitPool(t, subDir, "config", "user.name", "T")
@@ -138,7 +138,7 @@ func TestReconcileSubmodules_CreatesChildWorktree(t *testing.T) {
 	superDir := filepath.Join(base, "super")
 	poolDir := filepath.Join(base, "pool")
 
-	mustGitPool(t, "", "init", "--bare", subRemote)
+	mustGitPool(t, "", "init", "--bare", "--initial-branch=main", subRemote)
 	mustGitPool(t, "", "clone", subRemote, subDir)
 	mustGitPool(t, subDir, "config", "user.email", "t@t.com")
 	mustGitPool(t, subDir, "config", "user.name", "T")
@@ -165,6 +165,7 @@ func TestReconcileSubmodules_CreatesChildWorktree(t *testing.T) {
 	mustGitPool(t, superDir, "update-index", "--add", "--cacheinfo", "160000,"+subCommit+",vendor/lib")
 	mustGitPool(t, superDir, "add", ".gitmodules")
 	mustGitPool(t, superDir, "commit", "-m", "add sub")
+	mustGitPool(t, superDir, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "vendor/lib")
 
 	parentPath := filepath.Join(poolDir, "1", "super")
 	if err := os.MkdirAll(filepath.Dir(parentPath), 0o755); err != nil {
@@ -176,9 +177,10 @@ func TestReconcileSubmodules_CreatesChildWorktree(t *testing.T) {
 		Name: "1", Path: parentPath, Kind: WorktreeKindRoot,
 	}}}
 	_, err := ReconcileSubmodules(SubmoduleReconcileOptions{
-		ParentPath: parentPath,
-		State:      &state,
-		Submodules: config.SubmodulesConfig{Mode: "top", Fetch: "never"},
+		SourceRepoRoot: superDir,
+		ParentPath:     parentPath,
+		State:          &state,
+		Submodules:     config.SubmodulesConfig{Mode: "top", Fetch: "never"},
 	})
 	if err != nil {
 		t.Fatalf("ReconcileSubmodules: %v", err)
@@ -190,6 +192,11 @@ func TestReconcileSubmodules_CreatesChildWorktree(t *testing.T) {
 	}
 	if len(ChildrenOf(state, parentPath)) != 1 {
 		t.Fatalf("expected 1 child entry, got %d", len(ChildrenOf(state, parentPath)))
+	}
+	sourceBacking := mustGitPool(t, filepath.Join(superDir, "vendor", "lib"), "rev-parse", "--git-common-dir")
+	childBacking := mustGitPool(t, childPath, "rev-parse", "--git-common-dir")
+	if filepath.Clean(sourceBacking) != filepath.Clean(childBacking) {
+		t.Fatalf("expected shared backing repo, got %q vs %q", childBacking, sourceBacking)
 	}
 }
 

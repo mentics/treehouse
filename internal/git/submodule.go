@@ -95,16 +95,29 @@ func SubmoduleGitlinkCommit(repoRoot, submodulePath string) (string, error) {
 	return fields[2], nil
 }
 
-// EnsureBareRepo clones remoteURL into cachePath if it does not exist.
-func EnsureBareRepo(remoteURL, cachePath string) error {
-	if _, err := os.Stat(filepath.Join(cachePath, "HEAD")); err == nil {
-		return nil
+// ResolveSubmoduleRepoDir returns the absolute git common dir for an initialized
+// submodule checkout under sourceRepoRoot/submodulePath.
+func ResolveSubmoduleRepoDir(sourceRepoRoot, submodulePath string) (string, error) {
+	checkoutPath := filepath.Join(sourceRepoRoot, submodulePath)
+	gitEntry := filepath.Join(checkoutPath, ".git")
+	if _, err := os.Stat(gitEntry); os.IsNotExist(err) {
+		return "", fmt.Errorf(
+			"submodule %s is not initialized in the main repository; run git submodule update --init %s",
+			submodulePath, submodulePath,
+		)
+	} else if err != nil {
+		return "", fmt.Errorf("submodule %s: %w", submodulePath, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
-		return err
+
+	out, err := runGit(checkoutPath, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("submodule %s: %w", submodulePath, err)
 	}
-	_, err := runGit("", "clone", "--bare", remoteURL, cachePath)
-	return err
+	gitDir := filepath.Clean(out)
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Clean(filepath.Join(checkoutPath, gitDir))
+	}
+	return gitDir, nil
 }
 
 // FetchRepo fetches updates into a bare or full repository.
