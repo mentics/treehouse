@@ -10,9 +10,10 @@ import (
 )
 
 type Config struct {
-	MaxTrees int    `toml:"max_trees"`
-	Root     string `toml:"root"`
-	Hooks    Hooks  `toml:"hooks,omitempty"`
+	MaxTrees   int              `toml:"max_trees"`
+	Root       string           `toml:"root"`
+	Hooks      Hooks            `toml:"hooks,omitempty"`
+	Submodules SubmodulesConfig `toml:"submodules,omitempty"`
 }
 
 type Hooks struct {
@@ -51,6 +52,7 @@ func Load(repoRoot string) (Config, error) {
 		}
 	}
 
+	cfg.Submodules = cfg.Submodules.normalized()
 	return cfg, nil
 }
 
@@ -66,6 +68,7 @@ func LoadGlobal() (Config, error) {
 	if hasUserConfig {
 		cfg = userCfg
 	}
+	cfg.Submodules = cfg.Submodules.normalized()
 	return cfg, nil
 }
 

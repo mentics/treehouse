@@ -14,6 +14,8 @@ import (
 	"github.com/kunchenguid/treehouse/internal/ui"
 )
 
+var statusSubmodules bool
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show the status of all worktrees in the pool",
@@ -33,7 +35,8 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 
-		worktrees, err := pool.List(poolDir)
+		includeSubmodules := statusSubmodules || config.SubmodulesActive(cfg, false)
+		worktrees, err := pool.List(poolDir, pool.ListOptions{IncludeSubmodules: includeSubmodules})
 		if err != nil {
 			return err
 		}
@@ -49,7 +52,6 @@ var statusCmd = &cobra.Command{
 		cyan := color.New(color.FgCyan, color.Bold).SprintFunc()
 		magenta := color.New(color.FgMagenta).SprintFunc()
 
-		// statusWidth must be >= longest status string ("you're here" = 11)
 		const statusWidth = 11
 
 		for _, wt := range worktrees {
@@ -67,7 +69,6 @@ var statusCmd = &cobra.Command{
 				status = cyan(wt.Status)
 			}
 
-			// "%-4s  %-11s  " = 4 + 2 + 11 + 2 = 19 chars before path
 			statusPad := strings.Repeat(" ", statusWidth-len(wt.Status))
 			line := fmt.Sprintf("%-4s  %s%s  %s", wt.Name, status, statusPad, ui.PrettyPath(wt.Path))
 			if wt.Status == pool.StatusLeased && wt.LeaseHolder != "" {
@@ -82,11 +83,32 @@ var statusCmd = &cobra.Command{
 				}
 				fmt.Fprintf(os.Stdout, "%s%s\n", strings.Repeat(" ", 4+2+statusWidth+2), strings.Join(procStrs, ", "))
 			}
+
+			if includeSubmodules {
+				for _, child := range wt.Children {
+					childStatus := child.Status
+					switch child.Status {
+					case pool.SubmoduleStatusClean, pool.SubmoduleStatusWarm:
+						childStatus = green(child.Status)
+					case pool.SubmoduleStatusDirty:
+						childStatus = yellow(child.Status)
+					case pool.SubmoduleStatusInUse, pool.SubmoduleStatusLeased:
+						childStatus = red(child.Status)
+					}
+					commit := child.ExpectedCommit
+					if commit == "" {
+						commit = child.HeadCommit
+					}
+					fmt.Fprintf(os.Stdout, "%s      submodule   %-20s  %-7s  %s\n",
+						strings.Repeat(" ", 4), child.SubmodulePath, childStatus, commit)
+				}
+			}
 		}
 		return nil
 	},
 }
 
 func init() {
+	statusCmd.Flags().BoolVar(&statusSubmodules, "submodules", false, "Show nested submodule worktree status")
 	rootCmd.AddCommand(statusCmd)
 }

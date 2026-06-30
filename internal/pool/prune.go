@@ -295,8 +295,12 @@ func planPrune(entries []WorktreeEntry, resolveContext pruneContextResolver, opt
 	plan := prunePlan{
 		Planned: make(map[string]plannedPruneWorktree),
 	}
+	state := State{Worktrees: entries}
 	for _, wt := range entries {
-		worktree, skipped, stale, context, err := analyzePruneCandidate(resolveContext, wt, options)
+		if !wt.IsRoot() {
+			continue
+		}
+		worktree, skipped, stale, context, err := analyzePruneCandidate(resolveContext, wt, state, options)
 		if err != nil {
 			return prunePlan{}, err
 		}
@@ -416,7 +420,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 				continue
 			}
 
-			worktree, skipped, stale, context, err := analyzePruneCandidate(fixedPruneContextResolver(plannedWorktree.Context), state.Worktrees[i], options)
+			worktree, skipped, stale, context, err := analyzePruneCandidate(fixedPruneContextResolver(plannedWorktree.Context), state.Worktrees[i], state, options)
 			if err != nil {
 				return err
 			}
@@ -522,6 +526,11 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "could not remove worktree directory", err.Error()))
 					continue
 				}
+				if err := removePrunedSubmodules(state, worktree.Path, options, removed); err != nil {
+					clearReservation(&state.Worktrees[idx])
+					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipRemoveFailed, "could not remove submodule worktrees", err.Error()))
+					continue
+				}
 			}
 
 			removed[worktree.Path] = struct{}{}
@@ -531,9 +540,15 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 
 		kept := state.Worktrees[:0]
 		for _, wt := range state.Worktrees {
-			if _, ok := removed[wt.Path]; !ok {
-				kept = append(kept, wt)
+			if _, ok := removed[wt.Path]; ok {
+				continue
 			}
+			if wt.IsSubmodule() {
+				if _, ok := removed[wt.ParentPath]; ok {
+					continue
+				}
+			}
+			kept = append(kept, wt)
 		}
 		state.Worktrees = kept
 		return WriteState(poolDir, state)
@@ -544,9 +559,17 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 	return result, nil
 }
 
-func analyzePruneCandidate(resolveContext pruneContextResolver, wt WorktreeEntry, options PruneOptions) (PruneWorktree, PruneSkipped, bool, pruneContext, error) {
+func analyzePruneCandidate(resolveContext pruneContextResolver, wt WorktreeEntry, state State, options PruneOptions) (PruneWorktree, PruneSkipped, bool, pruneContext, error) {
 	worktree := PruneWorktree{Name: wt.Name, Path: wt.Path}
 	skipped := PruneSkipped{Name: wt.Name, Path: wt.Path}
+
+	if !wt.IsRoot() {
+		return worktree, skipped, false, pruneContext{}, nil
+	}
+
+	if _, blocked := ParentBlockedBySubmodules(state, wt.Path); blocked {
+		return worktree, skipped, false, pruneContext{}, nil
+	}
 
 	if wt.Destroying || wt.Leased || ownerAlive(wt) {
 		return worktree, skipped, false, pruneContext{}, nil

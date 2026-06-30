@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/kunchenguid/treehouse/internal/config"
 	"github.com/kunchenguid/treehouse/internal/git"
 	"github.com/kunchenguid/treehouse/internal/hooks"
 	"github.com/kunchenguid/treehouse/internal/process"
@@ -29,6 +30,8 @@ type WorktreeStatus struct {
 	Processes []process.ProcessInfo
 	// LeaseHolder is the recorded holder for a leased worktree, if any.
 	LeaseHolder string
+	// Children holds nested submodule status when requested.
+	Children []SubmoduleStatus
 }
 
 // acquireOptions controls how Acquire reserves the worktree it hands out.
@@ -42,16 +45,16 @@ type acquireOptions struct {
 	// hook stdout to stderr so the worktree path stays the only stdout line.
 	hookStdout io.Writer
 	hookStderr io.Writer
+	// submodules enables managed submodule worktree pooling.
+	submodules bool
+	submodulesCfg config.SubmodulesConfig
 }
 
 // Acquire reserves a clean worktree from the pool with a short-lived owner
 // reservation (the calling process). It is the backing call for the interactive
 // `treehouse get` subshell.
-func Acquire(repoRoot, poolDir string, poolSize int, postCreate []string) (string, error) {
-	return acquire(repoRoot, poolDir, poolSize, postCreate, acquireOptions{
-		hookStdout: os.Stdout,
-		hookStderr: os.Stderr,
-	})
+func Acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts AcquireOptions) (string, error) {
+	return acquire(repoRoot, poolDir, poolSize, postCreate, opts.toInternal())
 }
 
 // AcquireLease reserves a clean worktree and marks it durably LEASED so the
@@ -59,13 +62,38 @@ func Acquire(repoRoot, poolDir string, poolSize int, postCreate []string) (strin
 // until it is released by Release. holder is an optional label recorded with the
 // lease for diagnostics. Post-create hook stdout is routed to stderr so callers
 // can capture the returned path as the sole stdout line.
-func AcquireLease(repoRoot, poolDir string, poolSize int, postCreate []string, holder string) (string, error) {
-	return acquire(repoRoot, poolDir, poolSize, postCreate, acquireOptions{
-		lease:       true,
-		leaseHolder: holder,
-		hookStdout:  os.Stderr,
-		hookStderr:  os.Stderr,
-	})
+func AcquireLease(repoRoot, poolDir string, poolSize int, postCreate []string, holder string, opts AcquireOptions) (string, error) {
+	internal := opts.toInternal()
+	internal.lease = true
+	internal.leaseHolder = holder
+	internal.hookStdout = os.Stderr
+	internal.hookStderr = os.Stderr
+	return acquire(repoRoot, poolDir, poolSize, postCreate, internal)
+}
+
+// AcquireOptions configures optional acquire behavior.
+type AcquireOptions struct {
+	Submodules    bool
+	SubmodulesCfg config.SubmodulesConfig
+	HookStdout    io.Writer
+	HookStderr    io.Writer
+}
+
+func (o AcquireOptions) toInternal() acquireOptions {
+	stdout := o.HookStdout
+	stderr := o.HookStderr
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	return acquireOptions{
+		hookStdout:    stdout,
+		hookStderr:    stderr,
+		submodules:    o.Submodules,
+		submodulesCfg: o.SubmodulesCfg,
+	}
 }
 
 func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts acquireOptions) (string, error) {
@@ -83,6 +111,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 
 	var acquired string
 	var runPostCreate bool
+	var newChildPaths []string
 
 	err = WithStateLock(poolDir, func() error {
 		state, err := ReadState(poolDir)
@@ -94,20 +123,47 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 
 		// Try to find an available worktree (clean, not in-use, not leased)
 		for i, wt := range state.Worktrees {
-			if wt.Destroying || wt.Leased || ownerAlive(wt) {
+			if !wt.IsRoot() || wt.Destroying || wt.Leased || ownerAlive(wt) {
 				continue
 			}
 			inUse, _ := process.IsWorktreeInUse(wt.Path)
 			if inUse {
 				continue
 			}
-			dirty, _ := git.IsDirty(wt.Path)
+			dirty := false
+			if opts.submodules && len(ChildrenOf(state, wt.Path)) > 0 {
+				dirty, _ = isRootDirtyForPool(wt.Path, state)
+			} else {
+				dirty, _ = git.IsDirty(wt.Path)
+			}
 			if dirty {
 				continue
+			}
+			if opts.submodules {
+				if reason, blocked := ParentBlockedBySubmodules(state, wt.Path); blocked {
+					_ = reason
+					continue
+				}
 			}
 			// Found an available one — reset it
 			if err := git.ResetWorktree(wt.Path, branch); err != nil {
 				continue
+			}
+			if opts.submodules {
+				reconcile, err := ReconcileSubmodules(SubmoduleReconcileOptions{
+					ParentPath:  wt.Path,
+					State:       &state,
+					Submodules:  opts.submodulesCfg,
+					PostCreate:  postCreate,
+					HookStdout:  opts.hookStdout,
+					HookStderr:  opts.hookStderr,
+					OnAcquire:   true,
+					SetupBanner: os.Stderr,
+				})
+				if err != nil {
+					continue
+				}
+				newChildPaths = reconcile.NewChildPaths
 			}
 			if err := markAcquired(&state.Worktrees[i], opts); err != nil {
 				return err
@@ -121,8 +177,8 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		}
 
 		// No available worktree — create new if pool allows
-		if len(state.Worktrees) >= poolSize {
-			return fmt.Errorf("all %d worktrees are in use or dirty (max_trees = %d). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", len(state.Worktrees), poolSize)
+		if rootCount(state) >= poolSize {
+			return fmt.Errorf("all %d worktrees are in use or dirty (max_trees = %d). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", rootCount(state), poolSize)
 		}
 
 		name := nextName(state)
@@ -141,11 +197,29 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			Name:      name,
 			Path:      wtPath,
 			CreatedAt: time.Now(),
+			Kind:      WorktreeKindRoot,
 		}
 		if err := markAcquired(&entry, opts); err != nil {
 			return err
 		}
 		state.Worktrees = append(state.Worktrees, entry)
+
+		if opts.submodules {
+			reconcile, err := ReconcileSubmodules(SubmoduleReconcileOptions{
+				ParentPath:  wtPath,
+				State:       &state,
+				Submodules:  opts.submodulesCfg,
+				PostCreate:  postCreate,
+				HookStdout:  opts.hookStdout,
+				HookStderr:  opts.hookStderr,
+				OnAcquire:   true,
+				SetupBanner: os.Stderr,
+			})
+			if err != nil {
+				return err
+			}
+			newChildPaths = reconcile.NewChildPaths
+		}
 
 		acquired = wtPath
 		if err := WriteState(poolDir, state); err != nil {
@@ -159,6 +233,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 	}
 	if runPostCreate {
 		hooks.Run(postCreate, acquired, opts.hookStdout, opts.hookStderr)
+		RunSubmodulePostCreate(newChildPaths, postCreate, opts.hookStdout, opts.hookStderr)
 	}
 
 	return acquired, nil
@@ -181,7 +256,7 @@ func markAcquired(wt *WorktreeEntry, opts acquireOptions) error {
 
 // Release resets a managed worktree, clears its short-lived owner reservation or
 // durable lease, and returns it to the available pool.
-func Release(poolDir, worktreePath string) error {
+func Release(poolDir, worktreePath string, opts ReleaseOptions) error {
 	repoRoot, err := git.FindRepoRootFrom(worktreePath)
 	if err != nil {
 		return err
@@ -196,13 +271,18 @@ func Release(poolDir, worktreePath string) error {
 			return err
 		}
 		for _, wt := range state.Worktrees {
-			if wt.Path == worktreePath && wt.Destroying {
+			if filepath.Clean(wt.Path) == filepath.Clean(worktreePath) && wt.Destroying {
 				return fmt.Errorf("worktree %s is being destroyed", worktreePath)
 			}
 		}
 		return nil
 	}); err != nil {
 		return err
+	}
+	if opts.Submodules {
+		if err := ReleaseSubmodules(poolDir, worktreePath); err != nil {
+			return err
+		}
 	}
 	if err := git.ResetWorktree(worktreePath, branch); err != nil {
 		return err
@@ -212,24 +292,34 @@ func Release(poolDir, worktreePath string) error {
 		if err != nil {
 			return err
 		}
+		found := false
 		for i := range state.Worktrees {
-			if state.Worktrees[i].Path == worktreePath {
+			if filepath.Clean(state.Worktrees[i].Path) == filepath.Clean(worktreePath) {
 				if state.Worktrees[i].Destroying {
 					return fmt.Errorf("worktree %s is being destroyed", worktreePath)
 				}
 				state.Worktrees[i].OwnerPID = 0
 				state.Worktrees[i].OwnerStartedAt = 0
 				clearLease(&state.Worktrees[i])
+				found = true
 				break
 			}
+		}
+		if !found {
+			return fmt.Errorf("worktree %s is not managed by treehouse", worktreePath)
 		}
 		return WriteState(poolDir, state)
 	})
 }
 
+// ReleaseOptions configures optional release behavior.
+type ReleaseOptions struct {
+	Submodules bool
+}
+
 // List returns the current status of managed worktrees in poolDir.
 // Leased worktrees are reported with StatusLeased and their optional holder.
-func List(poolDir string) ([]WorktreeStatus, error) {
+func List(poolDir string, opts ListOptions) ([]WorktreeStatus, error) {
 	var result []WorktreeStatus
 
 	err := WithStateLock(poolDir, func() error {
@@ -246,7 +336,7 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 		cwd, _ := os.Getwd()
 
 		for _, wt := range state.Worktrees {
-			if wt.Destroying {
+			if !wt.IsRoot() || wt.Destroying {
 				continue
 			}
 			ws := WorktreeStatus{
@@ -258,18 +348,49 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 			procs, _ := process.FindProcessesInWorktree(wt.Path)
 			ws.Processes = procs
 
+			parentActive := false
 			if wt.Leased {
 				ws.Status = StatusLeased
 				ws.LeaseHolder = wt.LeaseHolder
+				parentActive = true
 			} else if ownerAlive(wt) {
 				ws.Status = StatusInUse
+				parentActive = true
 			} else if len(procs) > 0 {
 				ws.Status = StatusInUse
+				parentActive = true
 				if cwdInWorktree(cwd, wt.Path) {
 					ws.Status = StatusHere
 				}
-			} else if dirty, _ := git.IsDirty(wt.Path); dirty {
-				ws.Status = StatusDirty
+			} else {
+				var dirty bool
+				if len(ChildrenOf(state, wt.Path)) > 0 {
+					dirty, _ = isRootDirtyForPool(wt.Path, state)
+				} else {
+					dirty, _ = git.IsDirty(wt.Path)
+				}
+				if dirty {
+					ws.Status = StatusDirty
+				}
+			}
+
+			if opts.IncludeSubmodules {
+				ws.Children = ListSubmoduleStatus(state, wt.Path, parentActive)
+				for _, child := range ws.Children {
+					switch child.Status {
+					case SubmoduleStatusDirty:
+						ws.Status = StatusDirty
+					case SubmoduleStatusInUse, SubmoduleStatusLeased:
+						if ws.Status == StatusAvailable {
+							ws.Status = StatusInUse
+						}
+					}
+				}
+			} else if reason, blocked := ParentBlockedBySubmodules(state, wt.Path); blocked {
+				_ = reason
+				if ws.Status == StatusAvailable {
+					ws.Status = StatusDirty
+				}
 			}
 
 			result = append(result, ws)
@@ -278,6 +399,11 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 	})
 
 	return result, err
+}
+
+// ListOptions configures optional list behavior.
+type ListOptions struct {
+	IncludeSubmodules bool
 }
 
 func FindByPath(poolDir, path string) (*WorktreeEntry, error) {
@@ -294,19 +420,48 @@ func FindByPath(poolDir, path string) (*WorktreeEntry, error) {
 }
 
 func healState(state State) State {
+	parentExists := map[string]bool{}
 	var healed []WorktreeEntry
 	for _, wt := range state.Worktrees {
-		if _, err := os.Stat(wt.Path); err == nil {
-			if wt.OwnerPID != 0 && !ownerAlive(wt) {
-				wt.OwnerPID = 0
-				wt.OwnerStartedAt = 0
-				wt.Destroying = false
+		if wt.IsRoot() {
+			if _, err := os.Stat(wt.Path); err == nil {
+				if wt.OwnerPID != 0 && !ownerAlive(wt) {
+					wt.OwnerPID = 0
+					wt.OwnerStartedAt = 0
+					wt.Destroying = false
+				}
+				healed = append(healed, wt)
+				parentExists[filepath.Clean(wt.Path)] = true
 			}
-			healed = append(healed, wt)
+			continue
+		}
+		if wt.IsSubmodule() {
+			parent := filepath.Clean(wt.ParentPath)
+			if !parentExists[parent] {
+				continue
+			}
+			if _, err := os.Stat(wt.Path); err == nil {
+				if wt.OwnerPID != 0 && !ownerAlive(wt) {
+					wt.OwnerPID = 0
+					wt.OwnerStartedAt = 0
+					wt.Destroying = false
+				}
+				healed = append(healed, wt)
+			}
 		}
 	}
 	state.Worktrees = healed
 	return state
+}
+
+func rootCount(state State) int {
+	n := 0
+	for _, wt := range state.Worktrees {
+		if wt.IsRoot() {
+			n++
+		}
+	}
+	return n
 }
 
 func ownerAlive(wt WorktreeEntry) bool {
@@ -342,6 +497,52 @@ func sameDestroyReservation(current, reserved WorktreeEntry) bool {
 		current.OwnerStartedAt == reserved.OwnerStartedAt
 }
 
+// RootDirtyForPool reports whether a superproject worktree should block return
+// or reuse because of tracked changes. Untracked content in managed submodules
+// is ignored.
+func RootDirtyForPool(poolDir, parentPath string) (bool, error) {
+	state, err := ReadState(poolDir)
+	if err != nil {
+		return false, err
+	}
+	if len(ChildrenOf(state, parentPath)) == 0 {
+		return git.IsDirty(parentPath)
+	}
+	return isRootDirtyForPool(parentPath, state)
+}
+
+// isRootDirtyForPool reports whether a superproject worktree has changes that
+// should block pool reuse. Managed submodule paths with only untracked content
+// do not count as dirty.
+func isRootDirtyForPool(parentPath string, state State) (bool, error) {
+	out, err := git.StatusPorcelain(parentPath)
+	if err != nil {
+		return false, err
+	}
+	childByPath := map[string]WorktreeEntry{}
+	for _, child := range ChildrenOf(state, parentPath) {
+		childByPath[filepath.Clean(child.SubmodulePath)] = child
+	}
+	for _, line := range out {
+		if line == "" {
+			continue
+		}
+		path := git.PorcelainPath(line)
+		if child, ok := childByPath[filepath.Clean(path)]; ok {
+			dirty, err := git.HasTrackedChanges(child.Path)
+			if err != nil {
+				return true, err
+			}
+			if dirty {
+				return true, nil
+			}
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 func cwdInWorktree(cwd, worktreePath string) bool {
 	absCwd, err := filepath.Abs(cwd)
 	if err != nil {
@@ -361,6 +562,9 @@ func cwdInWorktree(cwd, worktreePath string) bool {
 func nextName(state State) string {
 	max := 0
 	for _, wt := range state.Worktrees {
+		if !wt.IsRoot() {
+			continue
+		}
 		if n, err := strconv.Atoi(wt.Name); err == nil && n > max {
 			max = n
 		}

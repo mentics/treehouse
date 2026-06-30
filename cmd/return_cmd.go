@@ -35,9 +35,18 @@ var returnCmd = &cobra.Command{
 		}
 
 		if !returnForce {
-			dirty, _ := git.IsDirty(wtPath)
+			dirty, _ := pool.RootDirtyForPool(poolDir, wtPath)
 			if dirty {
 				ok, err := ui.Confirm("Worktree has uncommitted changes. Clean and return?", true)
+				if err != nil || !ok {
+					fmt.Fprintln(os.Stderr, "🌳 Aborted.")
+					return nil
+				}
+			}
+
+			state, _ := pool.ReadState(poolDir)
+			for _, subPath := range pool.DirtySubmodules(state, wtPath) {
+				ok, err := ui.Confirm(fmt.Sprintf("Submodule %s has uncommitted changes. Clean and return?", subPath), true)
 				if err != nil || !ok {
 					fmt.Fprintln(os.Stderr, "🌳 Aborted.")
 					return nil
@@ -51,7 +60,8 @@ var returnCmd = &cobra.Command{
 
 		killLingeringProcesses(wtPath)
 
-		if err := pool.Release(poolDir, wtPath); err != nil {
+		releaseOpts := pool.ReleaseOptions{Submodules: hasManagedSubmodules(poolDir, wtPath)}
+		if err := pool.Release(poolDir, wtPath, releaseOpts); err != nil {
 			return fmt.Errorf("failed to return worktree: %w", err)
 		}
 
@@ -116,4 +126,12 @@ func resolveReturnPoolDir(wtPath string, explicitPath bool) (string, error) {
 		return "", errReturnWorktreeUnmanaged
 	}
 	return fallbackPoolDir, nil
+}
+
+func hasManagedSubmodules(poolDir, parentPath string) bool {
+	state, err := pool.ReadState(poolDir)
+	if err != nil {
+		return false
+	}
+	return len(pool.ChildrenOf(state, parentPath)) > 0
 }

@@ -129,8 +129,10 @@ type DestroyOptions struct {
 // set. Missing opt-in flags are reported as skips, not errors.
 func DestroyWorktree(poolDir, worktreePath string, opts DestroyOptions) (DestroyResult, error) {
 	var target *WorktreeEntry
+	var state State
 	if err := WithStateLock(poolDir, func() error {
-		state, err := ReadState(poolDir)
+		var err error
+		state, err = ReadState(poolDir)
 		if err != nil {
 			return err
 		}
@@ -154,7 +156,7 @@ func DestroyWorktree(poolDir, worktreePath string, opts DestroyOptions) (Destroy
 	}
 
 	// allowLeased is true: a named path is an explicit, single-target choice.
-	return planAndDestroy(poolDir, []WorktreeEntry{*target}, true, opts)
+	return planAndDestroy(poolDir, state, []WorktreeEntry{*target}, true, opts)
 }
 
 // DestroyPool plans or removes every managed worktree in poolDir (the bulk
@@ -162,8 +164,10 @@ func DestroyWorktree(poolDir, worktreePath string, opts DestroyOptions) (Destroy
 // IncludeLeased: a lease can only be cleared by naming its exact path.
 func DestroyPool(poolDir string, opts DestroyOptions) (DestroyResult, error) {
 	var targets []WorktreeEntry
+	var state State
 	if err := WithStateLock(poolDir, func() error {
-		state, err := ReadState(poolDir)
+		var err error
+		state, err = ReadState(poolDir)
 		if err != nil {
 			return err
 		}
@@ -171,16 +175,20 @@ func DestroyPool(poolDir string, opts DestroyOptions) (DestroyResult, error) {
 		if err := WriteState(poolDir, state); err != nil {
 			return err
 		}
-		targets = append([]WorktreeEntry(nil), state.Worktrees...)
+		for _, wt := range state.Worktrees {
+			if wt.IsRoot() {
+				targets = append(targets, wt)
+			}
+		}
 		return nil
 	}); err != nil {
 		return DestroyResult{}, err
 	}
 
-	return planAndDestroy(poolDir, targets, false, opts)
+	return planAndDestroy(poolDir, state, targets, false, opts)
 }
 
-func planAndDestroy(poolDir string, targets []WorktreeEntry, allowLeased bool, opts DestroyOptions) (DestroyResult, error) {
+func planAndDestroy(poolDir string, state State, targets []WorktreeEntry, allowLeased bool, opts DestroyOptions) (DestroyResult, error) {
 	repoRoot := resolvePoolRepoRoot(targets)
 	defaultRef := ""
 	if repoRoot != "" {
@@ -195,7 +203,10 @@ func planAndDestroy(poolDir string, targets []WorktreeEntry, allowLeased bool, o
 	var result DestroyResult
 	var removable []DestroyTarget
 	for _, wt := range targets {
-		target := classifyForDestroy(wt, defaultRef)
+		if !wt.IsRoot() {
+			continue
+		}
+		target := classifyForDestroy(wt, defaultRef, state)
 		measureDestroySize(&target)
 		ok, skip := opts.allows(target, allowLeased)
 		if ok {
@@ -260,8 +271,19 @@ func (opts DestroyOptions) missingFlags(target DestroyTarget, allowLeased bool) 
 // same safety primitives prune relies on (ownerAlive,
 // process.FindProcessesInWorktree, backingRepositoryMissing, git.IsDirty,
 // git.IsHeadMergedIntoRef against the ref from resolvePruneDefaultRef).
-func classifyForDestroy(wt WorktreeEntry, defaultRef string) DestroyTarget {
+func classifyForDestroy(wt WorktreeEntry, defaultRef string, state State) DestroyTarget {
 	target := DestroyTarget{Name: wt.Name, Path: wt.Path}
+
+	if wt.IsSubmodule() {
+		target.addClass(DestroyInUse, "submodule worktree managed by parent slot")
+		return finalizeDestroyTarget(target)
+	}
+
+	if wt.IsRoot() {
+		if _, blocked := ParentBlockedBySubmodules(state, wt.Path); blocked {
+			target.addClass(DestroyInUse, "managed submodule worktrees block removal")
+		}
+	}
 
 	if wt.Leased {
 		detail := ""
@@ -369,7 +391,7 @@ func executeDestroy(poolDir string, removable []DestroyTarget, repoRoot, default
 			if _, ok := plannedByPath[state.Worktrees[i].Path]; !ok {
 				continue
 			}
-			current := classifyForDestroy(state.Worktrees[i], defaultRef)
+			current := classifyForDestroy(state.Worktrees[i], defaultRef, state)
 			if planned, ok := plannedByPath[current.Path]; ok && current.Bytes == 0 {
 				current.Bytes = planned.Bytes
 			}
@@ -429,7 +451,7 @@ func executeDestroy(poolDir string, removable []DestroyTarget, repoRoot, default
 			path := state.Worktrees[idx].Path
 			currentEntry := state.Worktrees[idx]
 			restoreOriginalOwnerReservation(&currentEntry, reservation)
-			current := classifyForDestroy(currentEntry, defaultRef)
+			current := classifyForDestroy(currentEntry, defaultRef, state)
 			measureDestroySize(&current)
 			if planned, ok := plannedByPath[path]; ok && current.Bytes == 0 {
 				current.Bytes = planned.Bytes
@@ -470,15 +492,27 @@ func executeDestroy(poolDir string, removable []DestroyTarget, repoRoot, default
 				skips = append(skips, DestroySkip{Target: current})
 				continue
 			}
+			if err := removeManagedSubmodules(state, path, opts, removed); err != nil {
+				restoreOriginalOwnerReservation(&state.Worktrees[idx], reservation)
+				current.Detail = err.Error()
+				skips = append(skips, DestroySkip{Target: current})
+				continue
+			}
 			removed[path] = struct{}{}
 			destroyed = append(destroyed, current)
 		}
 
 		kept := state.Worktrees[:0]
 		for _, wt := range state.Worktrees {
-			if _, ok := removed[wt.Path]; !ok {
-				kept = append(kept, wt)
+			if _, ok := removed[wt.Path]; ok {
+				continue
 			}
+			if wt.IsSubmodule() {
+				if _, ok := removed[wt.ParentPath]; ok {
+					continue
+				}
+			}
+			kept = append(kept, wt)
 		}
 		state.Worktrees = kept
 		return WriteState(poolDir, state)

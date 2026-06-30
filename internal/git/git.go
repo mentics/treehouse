@@ -280,6 +280,59 @@ func IsDirty(worktreePath string) (bool, error) {
 	return out != "", nil
 }
 
+// StatusPorcelain returns non-empty porcelain lines from git status.
+func StatusPorcelain(worktreePath string) ([]string, error) {
+	out, err := runGit(worktreePath, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+// PorcelainPath extracts the path from a git status porcelain line.
+func PorcelainPath(line string) string {
+	line = strings.TrimSuffix(line, "\r")
+	if len(line) < 2 {
+		return ""
+	}
+	var path string
+	switch {
+	case len(line) >= 3 && line[2] == ' ':
+		path = line[3:]
+	case len(line) >= 2 && line[1] == ' ':
+		path = line[2:]
+	default:
+		return ""
+	}
+	path = strings.TrimSpace(path)
+	if idx := strings.Index(path, " -> "); idx >= 0 {
+		path = path[:idx]
+	}
+	return path
+}
+
+// HasTrackedChanges reports staged or unstaged changes to tracked files.
+func HasTrackedChanges(worktreePath string) (bool, error) {
+	out, err := runGit(worktreePath, "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "??") {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 func ShortHash(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return fmt.Sprintf("%x", h[:3])

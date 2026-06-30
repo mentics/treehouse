@@ -7,13 +7,26 @@ import (
 	"time"
 )
 
+type WorktreeKind string
+
+const (
+	WorktreeKindRoot      WorktreeKind = "root"
+	WorktreeKindSubmodule WorktreeKind = "submodule"
+)
+
 type WorktreeEntry struct {
-	Name           string    `json:"name"`
-	Path           string    `json:"path"`
-	CreatedAt      time.Time `json:"created_at"`
-	Destroying     bool      `json:"destroying,omitempty"`
-	OwnerPID       int32     `json:"owner_pid,omitempty"`
-	OwnerStartedAt int64     `json:"owner_started_at,omitempty"`
+	Name           string       `json:"name"`
+	Path           string       `json:"path"`
+	CreatedAt      time.Time    `json:"created_at"`
+	Kind           WorktreeKind `json:"kind,omitempty"`
+	ParentPath     string       `json:"parent_path,omitempty"`
+	SubmodulePath  string       `json:"submodule_path,omitempty"`
+	SubmoduleURL   string       `json:"submodule_url,omitempty"`
+	BackingRepoPath string       `json:"backing_repo_path,omitempty"`
+	ExpectedCommit string       `json:"expected_commit,omitempty"`
+	Destroying     bool         `json:"destroying,omitempty"`
+	OwnerPID       int32        `json:"owner_pid,omitempty"`
+	OwnerStartedAt int64        `json:"owner_started_at,omitempty"`
 	// Leased marks a worktree as durably reserved by an external consumer that
 	// keeps no live process inside it. Unlike OwnerPID/OwnerStartedAt (which are
 	// process-derived and self-heal when the owner dies), a lease persists until
@@ -24,6 +37,16 @@ type WorktreeEntry struct {
 	LeaseHolder string `json:"lease_holder,omitempty"`
 	// LeasedAt records when the lease was taken.
 	LeasedAt time.Time `json:"leased_at,omitempty,omitzero"`
+}
+
+// IsRoot reports whether the entry is a superproject worktree.
+func (e WorktreeEntry) IsRoot() bool {
+	return e.Kind == "" || e.Kind == WorktreeKindRoot
+}
+
+// IsSubmodule reports whether the entry is a managed submodule worktree.
+func (e WorktreeEntry) IsSubmodule() bool {
+	return e.Kind == WorktreeKindSubmodule
 }
 
 type State struct {
