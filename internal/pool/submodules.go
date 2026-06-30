@@ -575,7 +575,7 @@ func removePrunedSubmodules(state State, parentPath string, options PruneOptions
 			}
 			backing = resolved
 		}
-		if err := git.RemoveCleanWorktree(backing, child.Path); err != nil {
+		if err := git.RemoveWorktree(backing, child.Path); err != nil {
 			return fmt.Errorf("submodule %s: %w", child.SubmodulePath, err)
 		}
 		removed[child.Path] = struct{}{}

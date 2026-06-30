@@ -130,12 +130,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			if inUse {
 				continue
 			}
-			dirty := false
-			if opts.submodules && len(ChildrenOf(state, wt.Path)) > 0 {
-				dirty, _ = isRootDirtyForPool(wt.Path, state)
-			} else {
-				dirty, _ = git.IsDirty(wt.Path)
-			}
+			dirty, _ := rootWorktreeDirty(wt, state)
 			if dirty {
 				continue
 			}
@@ -363,12 +358,7 @@ func List(poolDir string, opts ListOptions) ([]WorktreeStatus, error) {
 					ws.Status = StatusHere
 				}
 			} else {
-				var dirty bool
-				if len(ChildrenOf(state, wt.Path)) > 0 {
-					dirty, _ = isRootDirtyForPool(wt.Path, state)
-				} else {
-					dirty, _ = git.IsDirty(wt.Path)
-				}
+				dirty, _ := rootWorktreeDirty(wt, state)
 				if dirty {
 					ws.Status = StatusDirty
 				}
@@ -509,6 +499,16 @@ func RootDirtyForPool(poolDir, parentPath string) (bool, error) {
 		return git.IsDirty(parentPath)
 	}
 	return isRootDirtyForPool(parentPath, state)
+}
+
+// rootWorktreeDirty reports whether a managed root worktree should block pool
+// reuse, prune, or destroy. Managed submodule paths with only untracked
+// content do not count as dirty on the parent.
+func rootWorktreeDirty(wt WorktreeEntry, state State) (bool, error) {
+	if wt.IsRoot() && len(ChildrenOf(state, wt.Path)) > 0 {
+		return isRootDirtyForPool(wt.Path, state)
+	}
+	return git.IsDirty(wt.Path)
 }
 
 // isRootDirtyForPool reports whether a superproject worktree has changes that

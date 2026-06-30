@@ -483,7 +483,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 			if plannedWorktree.Worktree.Orphaned {
 				worktree, skipped = finalOrphanPruneSafetyCheck(state.Worktrees[idx])
 			} else {
-				worktree, skipped = finalPruneSafetyCheck(context.DefaultRef, state.Worktrees[idx])
+				worktree, skipped = finalPruneSafetyCheck(context.DefaultRef, state, state.Worktrees[idx])
 			}
 			if skipped.Reason != "" {
 				clearReservation(&state.Worktrees[idx])
@@ -510,9 +510,21 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 					continue
 				}
 			} else {
-				if err := git.RemoveCleanWorktree(context.RepoRoot, worktree.Path); err != nil {
+				hadSubmodules := len(ChildrenOf(state, worktree.Path)) > 0
+				if err := removePrunedSubmodules(state, worktree.Path, options, removed); err != nil {
 					clearReservation(&state.Worktrees[idx])
-					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipRemoveFailed, "git refused to remove worktree", err.Error()))
+					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipRemoveFailed, "could not remove submodule worktrees", err.Error()))
+					continue
+				}
+				var removeErr error
+				if hadSubmodules {
+					removeErr = git.RemoveWorktree(context.RepoRoot, worktree.Path)
+				} else {
+					removeErr = git.RemoveCleanWorktree(context.RepoRoot, worktree.Path)
+				}
+				if removeErr != nil {
+					clearReservation(&state.Worktrees[idx])
+					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipRemoveFailed, "git refused to remove worktree", removeErr.Error()))
 					continue
 				}
 				container, err := removableWorktreeContainer(worktree.Path)
@@ -524,11 +536,6 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 				if err := os.RemoveAll(container); err != nil {
 					clearReservation(&state.Worktrees[idx])
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "could not remove worktree directory", err.Error()))
-					continue
-				}
-				if err := removePrunedSubmodules(state, worktree.Path, options, removed); err != nil {
-					clearReservation(&state.Worktrees[idx])
-					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipRemoveFailed, "could not remove submodule worktrees", err.Error()))
 					continue
 				}
 			}
@@ -582,10 +589,10 @@ func analyzePruneCandidate(resolveContext pruneContextResolver, wt WorktreeEntry
 	if inUse {
 		return worktree, skipped, false, pruneContext{}, nil
 	}
-	return analyzeIdleWorktree(resolveContext, wt, worktree, skipped, options)
+	return analyzeIdleWorktree(resolveContext, wt, state, worktree, skipped, options)
 }
 
-func finalPruneSafetyCheck(defaultRef string, wt WorktreeEntry) (PruneWorktree, PruneSkipped) {
+func finalPruneSafetyCheck(defaultRef string, state State, wt WorktreeEntry) (PruneWorktree, PruneSkipped) {
 	worktree := PruneWorktree{Name: wt.Name, Path: wt.Path}
 	skipped := PruneSkipped{Name: wt.Name, Path: wt.Path}
 
@@ -599,7 +606,7 @@ func finalPruneSafetyCheck(defaultRef string, wt WorktreeEntry) (PruneWorktree, 
 		return worktree, skipped
 	}
 	context := pruneContext{DefaultRef: defaultRef}
-	worktree, skipped, _, _, err = analyzeIdleWorktree(fixedPruneContextResolver(context), wt, worktree, skipped, PruneOptions{})
+	worktree, skipped, _, _, err = analyzeIdleWorktree(fixedPruneContextResolver(context), wt, state, worktree, skipped, PruneOptions{})
 	if err != nil {
 		skipped = newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotVerify, "cannot prove HEAD is merged into default branch", err.Error())
 	}
@@ -640,7 +647,7 @@ func finalOrphanPruneSafetyCheck(wt WorktreeEntry) (PruneWorktree, PruneSkipped)
 	return worktree, skipped
 }
 
-func analyzeIdleWorktree(resolveContext pruneContextResolver, wt WorktreeEntry, worktree PruneWorktree, skipped PruneSkipped, options PruneOptions) (PruneWorktree, PruneSkipped, bool, pruneContext, error) {
+func analyzeIdleWorktree(resolveContext pruneContextResolver, wt WorktreeEntry, state State, worktree PruneWorktree, skipped PruneSkipped, options PruneOptions) (PruneWorktree, PruneSkipped, bool, pruneContext, error) {
 	if orphaned, detail := backingRepositoryMissing(worktree.Path); orphaned {
 		if !options.PruneOrphans {
 			skipped = newPruneSkipped(wt.Name, wt.Path, PruneSkipOrphanedBackingRepo, pruneOrphanUnverifiedWarning, detail)
@@ -663,7 +670,7 @@ func analyzeIdleWorktree(resolveContext pruneContextResolver, wt WorktreeEntry, 
 		return worktree, skipped, true, pruneContext{}, nil
 	}
 
-	dirty, err := git.IsDirty(worktree.Path)
+	dirty, err := rootWorktreeDirty(wt, state)
 	if err != nil {
 		if orphaned, detail := backingRepositoryMissing(worktree.Path); orphaned {
 			skipped = newPruneSkipped(wt.Name, wt.Path, PruneSkipOrphanedBackingRepo, pruneOrphanUnverifiedWarning, detail)

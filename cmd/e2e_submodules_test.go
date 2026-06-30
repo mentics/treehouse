@@ -211,6 +211,36 @@ func TestPruneSubmodules_DoesNotRemoveActiveChild(t *testing.T) {
 	}
 }
 
+func TestPruneSubmodules_PrunesReturnedSlotWithWarmCache(t *testing.T) {
+	superDir, homeDir, _, _ := setupSuperprojectWithSubmodules(t)
+
+	stdout, stderr, code := runTreehouse(t, superDir, homeDir, nil, "get", "--lease", "--submodules")
+	if code != 0 {
+		t.Fatalf("get failed (code %d): %s", code, stderr)
+	}
+	wtPath := strings.TrimSpace(stdout)
+	childPath := filepath.Join(wtPath, "vendor", "libfoo")
+	if err := os.WriteFile(filepath.Join(childPath, ".warm-cache"), []byte("warm\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, returnErr, code := runTreehouse(t, superDir, homeDir, nil, "return", wtPath)
+	if code != 0 {
+		t.Fatalf("return failed (code %d): %s", code, returnErr)
+	}
+
+	_, pruneErr, code := runTreehouse(t, superDir, homeDir, nil, "prune", "--yes")
+	if code != 0 {
+		t.Fatalf("prune failed (code %d): %s", code, pruneErr)
+	}
+	if strings.Contains(pruneErr, "uncommitted changes") {
+		t.Fatalf("prune should ignore warm submodule cache, got: %s", pruneErr)
+	}
+	if _, err := os.Stat(wtPath); err == nil {
+		t.Fatalf("expected returned slot pruned, still exists at %s", wtPath)
+	}
+}
+
 func TestGetSubmodules_RecursiveRejected(t *testing.T) {
 	superDir, homeDir, _, _ := setupSuperprojectWithSubmodules(t)
 

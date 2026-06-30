@@ -129,7 +129,7 @@ func buildReleaseOptions(cfg config.Config) pool.ReleaseOptions {
 }
 
 func confirmAndReturnWorktree(poolDir, wtPath string, acquireOpts pool.AcquireOptions) error {
-	dirty, _ := git.IsDirty(wtPath)
+	dirty, _ := pool.RootDirtyForPool(poolDir, wtPath)
 	if dirty {
 		fmt.Fprintf(os.Stderr, "🌳 Worktree has uncommitted changes.\n")
 		ok, promptErr := ui.Confirm("Clean worktree and return to pool?", true)

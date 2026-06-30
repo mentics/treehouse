@@ -269,7 +269,7 @@ func (opts DestroyOptions) missingFlags(target DestroyTarget, allowLeased bool) 
 
 // classifyForDestroy determines a managed worktree's destroy class using the
 // same safety primitives prune relies on (ownerAlive,
-// process.FindProcessesInWorktree, backingRepositoryMissing, git.IsDirty,
+// process.FindProcessesInWorktree, backingRepositoryMissing, rootWorktreeDirty,
 // git.IsHeadMergedIntoRef against the ref from resolvePruneDefaultRef).
 func classifyForDestroy(wt WorktreeEntry, defaultRef string, state State) DestroyTarget {
 	target := DestroyTarget{Name: wt.Name, Path: wt.Path}
@@ -307,7 +307,7 @@ func classifyForDestroy(wt WorktreeEntry, defaultRef string, state State) Destro
 		return finalizeDestroyTarget(target)
 	}
 
-	dirty, err := git.IsDirty(wt.Path)
+	dirty, err := rootWorktreeDirty(wt, state)
 	if err != nil {
 		target.addClass(DestroyUnverified, "cannot check status: "+err.Error())
 		return finalizeDestroyTarget(target)
@@ -486,13 +486,13 @@ func executeDestroy(poolDir string, removable []DestroyTarget, repoRoot, default
 				}
 			}
 
-			if err := removeManagedWorktree(repoRoot, path); err != nil {
+			if err := removeManagedSubmodules(state, path, opts, removed); err != nil {
 				restoreOriginalOwnerReservation(&state.Worktrees[idx], reservation)
 				current.Detail = err.Error()
 				skips = append(skips, DestroySkip{Target: current})
 				continue
 			}
-			if err := removeManagedSubmodules(state, path, opts, removed); err != nil {
+			if err := removeManagedWorktree(repoRoot, path); err != nil {
 				restoreOriginalOwnerReservation(&state.Worktrees[idx], reservation)
 				current.Detail = err.Error()
 				skips = append(skips, DestroySkip{Target: current})
