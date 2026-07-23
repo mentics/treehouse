@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 var (
 	getLease          bool
 	getLeaseHolder    string
+	getJSON           bool
 	getSubmodules     bool
 	getSubmodulesMode string
 )
@@ -30,10 +32,11 @@ var getCmd = &cobra.Command{
 	Long: `Acquire a worktree from the pool and open a subshell in it.
 
 Pass --lease for a non-interactive, durable acquire: treehouse reserves the
-worktree, marks it leased in its persistent state, and prints only the worktree's
-absolute path to stdout (all banners go to stderr). A leased worktree is never
-handed out by a later get and never removed by prune, even with no process
-running inside it, until you release it with 'treehouse return <path>'.
+worktree and marks it leased in persistent state. By default it prints only the
+absolute path to stdout; add --json for the lease identity and metadata. All
+banners go to stderr. A leased worktree is never handed out by a later get and
+never removed by prune, even with no process running inside it, until you release
+it with 'treehouse return <path>'.
 
 Pass --submodules to prepare managed submodule worktrees at their real paths
 inside the acquired slot. Submodule pooling can also be enabled in treehouse.toml.`,
@@ -43,12 +46,17 @@ inside the acquired slot. Submodule pooling can also be enabled in treehouse.tom
 func init() {
 	getCmd.Flags().BoolVar(&getLease, "lease", false, "Durably lease a worktree without opening a subshell; print only its path to stdout")
 	getCmd.Flags().StringVar(&getLeaseHolder, "lease-holder", "", "Optional label recorded as the lease holder (defaults to $TREEHOUSE_LEASE_HOLDER)")
+	getCmd.Flags().BoolVar(&getJSON, "json", false, "Print lease allocation as JSON (requires --lease)")
 	getCmd.Flags().BoolVar(&getSubmodules, "submodules", false, "Prepare managed submodule worktrees for the acquired slot")
 	getCmd.Flags().StringVar(&getSubmodulesMode, "submodules-mode", "", "Submodule depth: top (default) or recursive (not supported yet)")
 	rootCmd.AddCommand(getCmd)
 }
 
 func getRunE(cmd *cobra.Command, args []string) error {
+	if getJSON && !getLease {
+		return fmt.Errorf("--json requires --lease")
+	}
+
 	repoRoot, err := git.FindRepoRoot()
 	if err != nil {
 		return fmt.Errorf("not in a git repository: %w", err)
@@ -122,12 +130,6 @@ func buildAcquireOptions(cfg config.Config) pool.AcquireOptions {
 	}
 }
 
-func buildReleaseOptions(cfg config.Config) pool.ReleaseOptions {
-	return pool.ReleaseOptions{
-		Submodules: config.SubmodulesActive(cfg, getSubmodules),
-	}
-}
-
 func confirmAndReturnWorktree(poolDir, wtPath string, acquireOpts pool.AcquireOptions) error {
 	dirty, _ := pool.RootDirtyForPool(poolDir, wtPath)
 	if dirty {
@@ -165,24 +167,27 @@ func confirmAndReturnWorktree(poolDir, wtPath string, acquireOpts pool.AcquireOp
 	return nil
 }
 
-// getLeaseRunE performs a non-interactive, durable acquire. It reserves a
-// worktree, marks it leased in persistent state, prints only the worktree path
-// to stdout, and routes every human-facing message to stderr so that
-// `path=$(treehouse get --lease)` works cleanly in scripts.
+// getLeaseRunE performs a non-interactive, durable acquire. It writes either the
+// worktree path or the requested JSON allocation to stdout and routes every
+// human-facing message to stderr, keeping both output modes machine-readable.
 func getLeaseRunE(repoRoot, poolDir string, cfg config.Config, acquireOpts pool.AcquireOptions) error {
 	holder := getLeaseHolder
 	if holder == "" {
 		holder = os.Getenv("TREEHOUSE_LEASE_HOLDER")
 	}
 
-	wtPath, err := pool.AcquireLease(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, holder, acquireOpts)
+	lease, err := pool.AcquireLeaseInfo(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, holder, acquireOpts)
 	if err != nil {
 		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "🌳 Leased worktree at %s. Run 'treehouse return %s' to release it.\n",
-		ui.PrettyPath(wtPath), ui.PrettyPath(wtPath))
-	fmt.Fprintln(os.Stdout, wtPath)
+		ui.PrettyPath(lease.Path), ui.PrettyPath(lease.Path))
+	if getJSON {
+		return json.NewEncoder(os.Stdout).Encode(lease)
+	}
+	// The bare path is the only thing on stdout, so callers can capture it.
+	fmt.Fprintln(os.Stdout, lease.Path)
 	return nil
 }
 

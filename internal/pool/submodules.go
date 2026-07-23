@@ -265,29 +265,36 @@ func ReleaseSubmodules(poolDir, parentPath string) error {
 		if err != nil {
 			return err
 		}
-		children := ChildrenOf(state, parentPath)
-		for _, child := range children {
-			if child.ExpectedCommit == "" {
-				continue
-			}
-			if _, err := os.Stat(child.Path); err != nil {
-				continue
-			}
-			if err := git.ResetWorktreeToRef(child.Path, child.ExpectedCommit); err != nil {
-				return fmt.Errorf("submodule %s: %w", child.SubmodulePath, err)
-			}
-		}
-		for i := range state.Worktrees {
-			if state.Worktrees[i].IsSubmodule() && filepath.Clean(state.Worktrees[i].ParentPath) == filepath.Clean(parentPath) {
-				state.Worktrees[i].OwnerPID = 0
-				state.Worktrees[i].OwnerStartedAt = 0
-				state.Worktrees[i].Leased = false
-				state.Worktrees[i].LeaseHolder = ""
-				state.Worktrees[i].LeasedAt = time.Time{}
-			}
+		if err := releaseSubmodulesLocked(&state, parentPath); err != nil {
+			return err
 		}
 		return WriteState(poolDir, state)
 	})
+}
+
+// releaseSubmodulesLocked resets managed submodule worktrees and clears their
+// reservations. The caller must already hold the pool state lock.
+func releaseSubmodulesLocked(state *State, parentPath string) error {
+	children := ChildrenOf(*state, parentPath)
+	for _, child := range children {
+		if child.ExpectedCommit == "" {
+			continue
+		}
+		if _, err := os.Stat(child.Path); err != nil {
+			continue
+		}
+		if err := git.ResetWorktreeToRef(child.Path, child.ExpectedCommit); err != nil {
+			return fmt.Errorf("submodule %s: %w", child.SubmodulePath, err)
+		}
+	}
+	for i := range state.Worktrees {
+		if state.Worktrees[i].IsSubmodule() && filepath.Clean(state.Worktrees[i].ParentPath) == filepath.Clean(parentPath) {
+			state.Worktrees[i].OwnerPID = 0
+			state.Worktrees[i].OwnerStartedAt = 0
+			clearLease(&state.Worktrees[i])
+		}
+	}
+	return nil
 }
 
 // ParentBlockedBySubmodules reports whether a parent slot cannot be reused.
