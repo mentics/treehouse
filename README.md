@@ -85,7 +85,7 @@ make install
 ## How It Works
 
 Treehouse manages a **pool of git worktrees** per repository, stored under the configured treehouse root.
-The default treehouse root is `~/.treehouse/`.
+The default treehouse root is `~/.treehouse/` (or `$TREEHOUSE_HOME` / `$TREEHOUSE_WORKTREES` when those env vars are set; see Configuration).
 
 ```
   treehouse
@@ -157,6 +157,7 @@ The default treehouse root is `~/.treehouse/`.
 | `treehouse destroy <path>` | Dry-run removal of one worktree (safe by default; `--yes` to execute) |
 | `treehouse destroy <pool> --all` | Dry-run removal of every disposable worktree in that pool |
 | `treehouse init`           | Create a default `treehouse.toml` config file        |
+| `treehouse env`            | Print resolved TREEHOUSE_HOME, worktrees root, and user config paths |
 | `treehouse update`         | Update treehouse to the latest version               |
 
 ### Flags
@@ -303,17 +304,36 @@ Create a repo config file with `treehouse init`, or add one manually:
 
 **Repo-level:** `treehouse.toml` in the repository root
 
-**User-level:** `~/.config/treehouse/config.toml`
+**User-level:** `~/.config/treehouse/config.toml` by default, or `$TREEHOUSE_HOME/config.toml` when `TREEHOUSE_HOME` is set
 
 ```toml
 # Maximum number of worktrees in the pool
 max_trees = 16
 
 # Optional worktree root directory.
-# Empty uses $HOME/.treehouse.
+# Empty uses $HOME/.treehouse (or $TREEHOUSE_HOME / $TREEHOUSE_WORKTREES when set).
 # Relative paths are resolved from the repo root for repo-scoped commands.
 # Use an absolute user-level root for treehouse prune --all.
 # root = "$HOME/worktrees"
+```
+
+### Environment variables
+
+| Variable | Role |
+| --- | --- |
+| `TREEHOUSE_HOME` | Replaces `$HOME/.treehouse` as the durable Treehouse home. User config is `$TREEHOUSE_HOME/config.toml`. When `TREEHOUSE_WORKTREES` is unset, pools live directly under this path (no extra `.treehouse` segment). |
+| `TREEHOUSE_WORKTREES` | Optional. Parent directory for pools; worktrees go directly under it (`$TREEHOUSE_WORKTREES/{repo}-{hash}/...`). |
+
+Both must be absolute paths (after env expansion). Pool-root precedence is `TREEHOUSE_WORKTREES` > config `root` > `TREEHOUSE_HOME` > `$HOME/.treehouse`. Config `root` still appends `.treehouse`; the env vars do not.
+
+`treehouse env` prints the effective home, worktrees root, and user config path (including `$HOME`-derived defaults when the env vars are unset)—useful for verifying mounts in a devcontainer:
+
+```sh
+: "${TREEHOUSE_HOME:=/workspaces/.treehouse-home}"
+export TREEHOUSE_HOME
+# optional separate volume for large worktrees:
+# export TREEHOUSE_WORKTREES=/mnt/worktrees
+treehouse env
 ```
 
 The repo-level config takes precedence for repo-safe settings.
@@ -322,7 +342,7 @@ If no config is found, the default pool size is 16.
 
 ### Hooks
 
-You can run commands automatically at worktree lifecycle points by adding a `[hooks]` section to the user-level config at `~/.config/treehouse/config.toml`.
+You can run commands automatically at worktree lifecycle points by adding a `[hooks]` section to the user-level config (`~/.config/treehouse/config.toml`, or `$TREEHOUSE_HOME/config.toml` when `TREEHOUSE_HOME` is set).
 Hooks in repo-level `treehouse.toml` are ignored for safety.
 `treehouse destroy` always reads `pre_destroy` from the user-level config because it can target a pool by path.
 

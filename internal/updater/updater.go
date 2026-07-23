@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/treehouse/internal/config"
 )
 
 const (
@@ -49,7 +51,8 @@ type CheckResult struct {
 	ChecksumURL     string `json:"checksum_url,omitempty"`
 }
 
-// CacheEntry is persisted to ~/.treehouse/update-check.json.
+// CacheEntry is persisted to TREEHOUSE_HOME/update-check.json (or
+// ~/.treehouse/update-check.json when TREEHOUSE_HOME is unset).
 type CacheEntry struct {
 	CheckedAt     time.Time `json:"checked_at"`
 	LatestVersion string    `json:"latest_version"`
@@ -110,8 +113,8 @@ func CheckLatest(currentVersion string) (*CheckResult, error) {
 	return result, nil
 }
 
-// ReadCache reads ~/.treehouse/update-check.json and returns a CheckResult
-// if the cache exists. Returns nil if missing or corrupt.
+// ReadCache reads the update-check cache (under DataDir) and returns a
+// CheckResult if the cache exists. Returns nil if missing or corrupt.
 func ReadCache(currentVersion string) *CheckResult {
 	path := cachePath()
 	data, err := os.ReadFile(path)
@@ -352,11 +355,11 @@ func requireHTTPS(url string) error {
 }
 
 func cachePath() string {
-	home, err := os.UserHomeDir()
+	dir, err := config.DataDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, treehouseDir, cacheFileName)
+	return filepath.Join(dir, cacheFileName)
 }
 
 func writeCache(entry CacheEntry) error {

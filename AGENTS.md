@@ -7,7 +7,7 @@ Treehouse is a Go CLI tool that manages a pool of git worktrees for parallel AI 
 ## Project Structure
 
 - `main.go` - entry point, calls `cmd.Execute()`
-- `cmd/` - CLI commands (cobra): `get` (incl. `get --lease`), `enter`, `return`, `status`, `prune`, `destroy`
+- `cmd/` - CLI commands (cobra): `get` (incl. `get --lease`), `enter`, `return`, `status`, `prune`, `destroy`, `env`
 - `internal/config/` - config file loading (`treehouse.toml`)
 - `internal/hooks/` - user-configured lifecycle hook command execution
 - `internal/pool/` - pool manager (acquire, release, list, destroy, prune) + state file
@@ -71,7 +71,8 @@ This project targets Linux, macOS, and Windows. All new code **must** work on Wi
 
 ## Config
 
-Place repo-safe settings in repo root `treehouse.toml` or user-level `~/.config/treehouse/config.toml`:
+Place repo-safe settings in repo root `treehouse.toml` or user-level config
+(`~/.config/treehouse/config.toml`, or `$TREEHOUSE_HOME/config.toml` when set):
 
 ```toml
 max_trees = 16
@@ -87,6 +88,11 @@ pre_destroy = ["./scripts/teardown.sh"]
 ```
 
 Hooks are ignored in repo-level config for safety.
+
+`TREEHOUSE_HOME` relocates durable state (user config + default pool parent) off `$HOME/.treehouse`.
+`TREEHOUSE_WORKTREES` optionally puts pools directly under another absolute path.
+Precedence: `TREEHOUSE_WORKTREES` > config `root` > `TREEHOUSE_HOME` > `$HOME/.treehouse`.
+`treehouse env` prints the resolved paths.
 
 ## Maintaining this file
 

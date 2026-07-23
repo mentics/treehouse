@@ -9,6 +9,11 @@ import (
 	"github.com/kunchenguid/treehouse/internal/git"
 )
 
+const (
+	EnvHome      = "TREEHOUSE_HOME"
+	EnvWorktrees = "TREEHOUSE_WORKTREES"
+)
+
 type Config struct {
 	MaxTrees   int              `toml:"max_trees"`
 	Root       string           `toml:"root"`
@@ -74,17 +79,76 @@ func LoadGlobal() (Config, error) {
 
 func loadUser() (Config, bool, error) {
 	cfg := DefaultConfig()
-	if home, err := os.UserHomeDir(); err == nil {
-		userPath := filepath.Join(home, ".config", "treehouse", "config.toml")
-		if _, err := os.Stat(userPath); err == nil {
-			if _, err := toml.DecodeFile(userPath, &cfg); err != nil {
-				return cfg, false, err
-			}
-			return cfg, true, nil
-		}
+	userPath, err := UserConfigPath()
+	if err != nil {
+		return cfg, false, err
 	}
-
+	if _, err := os.Stat(userPath); err == nil {
+		if _, err := toml.DecodeFile(userPath, &cfg); err != nil {
+			return cfg, false, err
+		}
+		return cfg, true, nil
+	}
 	return cfg, false, nil
+}
+
+// absoluteEnvPath reads name from the environment, expands embedded variables,
+// and requires the result to be absolute. An unset or empty value returns ok=false.
+func absoluteEnvPath(name string) (path string, ok bool, err error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return "", false, nil
+	}
+	expanded := os.ExpandEnv(raw)
+	if !filepath.IsAbs(expanded) {
+		return "", true, fmt.Errorf("%s must be an absolute path, got %q", name, expanded)
+	}
+	return filepath.Clean(expanded), true, nil
+}
+
+// TreehouseHome returns the absolute TREEHOUSE_HOME value when set.
+func TreehouseHome() (path string, ok bool, err error) {
+	return absoluteEnvPath(EnvHome)
+}
+
+// TreehouseWorktrees returns the absolute TREEHOUSE_WORKTREES value when set.
+func TreehouseWorktrees() (path string, ok bool, err error) {
+	return absoluteEnvPath(EnvWorktrees)
+}
+
+// UserConfigPath returns the user-level config.toml path.
+// When TREEHOUSE_HOME is set this is $TREEHOUSE_HOME/config.toml; otherwise
+// ~/.config/treehouse/config.toml.
+func UserConfigPath() (string, error) {
+	home, set, err := TreehouseHome()
+	if err != nil {
+		return "", err
+	}
+	if set {
+		return filepath.Join(home, "config.toml"), nil
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(userHome, ".config", "treehouse", "config.toml"), nil
+}
+
+// DataDir returns the durable Treehouse data directory: TREEHOUSE_HOME when set,
+// otherwise $HOME/.treehouse. Used for update-check cache and similar state.
+func DataDir() (string, error) {
+	home, set, err := TreehouseHome()
+	if err != nil {
+		return "", err
+	}
+	if set {
+		return home, nil
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(userHome, ".treehouse"), nil
 }
 
 func ResolvePoolDir(repoRoot string, root string) (string, error) {
@@ -107,23 +171,37 @@ func ResolvePoolDir(repoRoot string, root string) (string, error) {
 }
 
 // ResolvePoolRoot resolves the directory that contains per-repository pools.
-// Relative roots require repoRoot because they are resolved from the repository
-// root.
+//
+// Precedence: TREEHOUSE_WORKTREES > config root > TREEHOUSE_HOME > $HOME/.treehouse.
+// Env-based paths are used directly (no ".treehouse" suffix). Config root and the
+// legacy default still append ".treehouse". Relative config roots require repoRoot.
 func ResolvePoolRoot(repoRoot string, root string) (string, error) {
-	if root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(home, ".treehouse"), nil
+	if worktrees, set, err := TreehouseWorktrees(); err != nil {
+		return "", err
+	} else if set {
+		return worktrees, nil
 	}
 
-	expanded := os.ExpandEnv(root)
-	if !filepath.IsAbs(expanded) {
-		if repoRoot == "" {
-			return "", fmt.Errorf("relative treehouse root %q requires a repository", root)
+	if root != "" {
+		expanded := os.ExpandEnv(root)
+		if !filepath.IsAbs(expanded) {
+			if repoRoot == "" {
+				return "", fmt.Errorf("relative treehouse root %q requires a repository", root)
+			}
+			expanded = filepath.Join(repoRoot, expanded)
 		}
-		expanded = filepath.Join(repoRoot, expanded)
+		return filepath.Join(expanded, ".treehouse"), nil
 	}
-	return filepath.Join(expanded, ".treehouse"), nil
+
+	if home, set, err := TreehouseHome(); err != nil {
+		return "", err
+	} else if set {
+		return home, nil
+	}
+
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(userHome, ".treehouse"), nil
 }

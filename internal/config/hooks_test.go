@@ -9,6 +9,8 @@ import (
 )
 
 func TestLoad_IgnoresRepoHooks(t *testing.T) {
+	t.Setenv(EnvHome, "")
+	t.Setenv(EnvWorktrees, "")
 	repoDir := t.TempDir()
 	setUserHome(t, t.TempDir())
 
@@ -39,6 +41,8 @@ pre_destroy = ["echo c"]
 }
 
 func TestLoad_UserHooks(t *testing.T) {
+	t.Setenv(EnvHome, "")
+	t.Setenv(EnvWorktrees, "")
 	repoDir := t.TempDir()
 	userHome := t.TempDir()
 	setUserHome(t, userHome)
@@ -71,6 +75,8 @@ pre_destroy = ["echo c"]
 }
 
 func TestLoad_HooksDefaultEmpty(t *testing.T) {
+	t.Setenv(EnvHome, "")
+	t.Setenv(EnvWorktrees, "")
 	repoDir := t.TempDir()
 	setUserHome(t, t.TempDir())
 
