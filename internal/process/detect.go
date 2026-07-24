@@ -47,11 +47,10 @@ func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
 		return nil, err
 	}
 
-	absWorktree, err := filepath.Abs(worktreePath)
+	absWorktree, err := absResolved(worktreePath)
 	if err != nil {
 		return nil, err
 	}
-	absWorktree = resolvePath(absWorktree)
 
 	var result []ProcessInfo
 
@@ -61,18 +60,12 @@ func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
 			continue
 		}
 
-		absCwd, err := filepath.Abs(cwd)
-		if err != nil {
-			continue
-		}
-		absCwd = resolvePath(absCwd)
-
-		rel, err := filepath.Rel(absWorktree, absCwd)
+		absCwd, err := absResolved(cwd)
 		if err != nil {
 			continue
 		}
 
-		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		if pathInWorktree(absWorktree, absCwd) {
 			name, _ := p.Name()
 			result = append(result, ProcessInfo{
 				PID:  p.Pid,
@@ -82,6 +75,23 @@ func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
 	}
 
 	return result, nil
+}
+
+func absResolved(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return resolvePath(abs), nil
+}
+
+// pathInWorktree reports whether absPath is the worktree root or a descendant.
+func pathInWorktree(absWorktree, absPath string) bool {
+	rel, err := filepath.Rel(absWorktree, absPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // resolvePath returns the symlink-resolved path, or the input if resolution
