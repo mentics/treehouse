@@ -22,7 +22,30 @@ import (
 // Returns the list of processes that were targeted. Errors only if the initial
 // scan fails; individual kill failures (e.g. process already gone) are
 // swallowed.
+// terminateEnabled gates worktree process kills. Set false to diagnose whether
+// termination restarts remote/devcontainer sessions on return.
+const terminateEnabled = false
+
+// TerminateWorktreeProcesses finds every process whose cwd is within the given
+// worktree path and terminates detached leftovers.
+//
+// A cwd match is skipped when Treehouse itself (or an ancestor) owns it, or when
+// any living ancestor has a cwd outside the worktree. That spares active
+// sessions rooted elsewhere (editors, remote agents, parent shells) without
+// hardcoding process names. Orphaned or fully worktree-rooted trees are still
+// terminated.
+//
+// On unix it sends SIGTERM, waits up to gracePeriod for processes to exit,
+// then SIGKILLs any survivors. On windows it uses TerminateProcess.
+//
+// Returns the list of processes that were targeted. Errors only if the initial
+// scan fails; individual kill failures (e.g. process already gone) are
+// swallowed.
 func TerminateWorktreeProcesses(worktreePath string, gracePeriod time.Duration) ([]ProcessInfo, error) {
+	if !terminateEnabled {
+		return nil, nil
+	}
+
 	absWorktree, err := absResolved(worktreePath)
 	if err != nil {
 		return nil, err

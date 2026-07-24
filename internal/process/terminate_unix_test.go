@@ -25,6 +25,7 @@ func TestTerminateWorktreeProcesses_NoProcesses(t *testing.T) {
 }
 
 func TestTerminateWorktreeProcesses_KillsOrphanInWorktree(t *testing.T) {
+	t.Skip("terminate disabled for devcontainer-restart diagnosis")
 	dir := t.TempDir()
 	pid := startOrphan(t, dir, "sleep 60")
 
@@ -40,6 +41,7 @@ func TestTerminateWorktreeProcesses_KillsOrphanInWorktree(t *testing.T) {
 }
 
 func TestTerminateWorktreeProcesses_EscalatesToKill(t *testing.T) {
+	t.Skip("terminate disabled for devcontainer-restart diagnosis")
 	dir := t.TempDir()
 	// Ignore SIGTERM in the orphaned sleep; only SIGKILL ends it.
 	pid := startOrphan(t, dir, "trap '' TERM; sleep 60")
