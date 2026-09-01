@@ -1,7 +1,14 @@
 .PHONY: build test fmt lint dist install clean demo
 
-VERSION ?= dev
-LDFLAGS := -X main.version=$(VERSION)
+# Default version comes from release-please manifest so fork builds stay aligned
+# with upstream release cadence after merges.
+MANIFEST_VERSION := $(shell sed -n 's/.*": "\([^"]*\)".*/\1/p' .release-please-manifest.json 2>/dev/null)
+VERSION ?= $(or $(MANIFEST_VERSION),dev)
+ifeq ($(VERSION),dev)
+LDFLAGS := -X main.version=dev
+else
+LDFLAGS := -X main.version=v$(VERSION)
+endif
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o treehouse .
