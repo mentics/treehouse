@@ -187,7 +187,7 @@ func TestReadState_RecoversFromPartiallyWrittenFile(t *testing.T) {
 // same path as) a worktree that still exists on disk.
 func TestReadState_RecoveredWorktreesBlockAcquire(t *testing.T) {
 	repoDir, poolDir := setupLocalRepo(t)
-	if _, err := Acquire(repoDir, poolDir, 1, nil, AcquireOptions{}); err != nil {
+	if _, err := AcquireWithOptions(repoDir, poolDir, 1, nil, AcquireOptions{}); err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
 
@@ -195,7 +195,7 @@ func TestReadState_RecoveredWorktreesBlockAcquire(t *testing.T) {
 		t.Fatalf("truncate state file: %v", err)
 	}
 
-	if _, err := Acquire(repoDir, poolDir, 1, nil, AcquireOptions{}); err == nil {
+	if _, err := AcquireWithOptions(repoDir, poolDir, 1, nil, AcquireOptions{}); err == nil {
 		t.Fatal("Acquire after state corruption should refuse to hand out the pool's only worktree, got nil error")
 	}
 

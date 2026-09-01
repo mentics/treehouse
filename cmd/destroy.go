@@ -12,9 +12,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kunchenguid/treehouse/internal/config"
-	"github.com/kunchenguid/treehouse/internal/git"
 	"github.com/kunchenguid/treehouse/internal/pool"
 	"github.com/kunchenguid/treehouse/internal/ui"
+	"github.com/kunchenguid/treehouse/internal/vcs"
 )
 
 var (
@@ -164,15 +164,15 @@ func resolveDestroyPoolFromTarget(targetPath string) (string, error) {
 		return candidate, nil
 	}
 
-	repoRoot, err := git.FindMainRepoRootFrom(abs)
+	repoRoot, err := vcs.FindMainRepoRootFrom(abs)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve a treehouse pool from %s: not a pool directory or git repository", targetPath)
+		return "", fmt.Errorf("cannot resolve a treehouse pool from %s: not a pool directory or git/jj repository", targetPath)
 	}
 	cfg, err := config.Load(repoRoot)
 	if err != nil {
 		return "", fmt.Errorf("failed to load config: %w", err)
 	}
-	return config.ResolvePoolDir(repoRoot, cfg.Root)
+	return config.ResolvePoolDir(repoRoot, config.ResolveRoot(rootFlag, cfg))
 }
 
 // destroySingleExit makes a single named destruction fail loudly when the
@@ -185,13 +185,17 @@ func destroySingleExit(result pool.DestroyResult, opts pool.DestroyOptions) erro
 		if skip.LeasedBulk {
 			continue
 		}
-		if len(skip.NeededFlags) > 0 {
-			return fmt.Errorf("did not destroy %s (%s); re-run with %s",
-				skip.Target.Name, skip.Target.Class, strings.Join(skip.NeededFlags, " "))
+		flags := skip.NeededFlags
+		if len(flags) == 0 && skip.NeededFlag != "" {
+			flags = []string{skip.NeededFlag}
 		}
-		if skip.NeededFlag != "" {
+		if len(flags) > 0 {
+			if unverifiedOtherFlavor(skip.Target) {
+				return fmt.Errorf("did not destroy %s (unverified %s-flavored worktree); re-run with %s to destroy it and migrate the pool",
+					skip.Target.Name, skip.Target.Flavor, strings.Join(flags, " "))
+			}
 			return fmt.Errorf("did not destroy %s (%s); re-run with %s",
-				skip.Target.Name, skip.Target.Class, skip.NeededFlag)
+				skip.Target.Name, skip.Target.Class, strings.Join(flags, " "))
 		}
 		return fmt.Errorf("did not destroy %s: %s", skip.Target.Name, skip.Target.Detail)
 	}
@@ -283,16 +287,41 @@ func destroySkipHint(s pool.DestroySkip) string {
 	if s.LeasedBulk {
 		return "leased: name the exact path with " + pool.IncludeLeasedFlag + " (never removed by --all)"
 	}
-	if len(s.NeededFlags) > 0 {
-		return "re-run with " + strings.Join(s.NeededFlags, " ") + " to include"
+	flags := s.NeededFlags
+	if len(flags) == 0 && s.NeededFlag != "" {
+		flags = []string{s.NeededFlag}
 	}
-	if s.NeededFlag != "" {
-		return "re-run with " + s.NeededFlag + " to include"
+	if len(flags) > 0 {
+		if unverifiedOtherFlavor(s.Target) {
+			return "unverified " + s.Target.Flavor + "-flavored worktree: re-run with " + strings.Join(flags, " ") + " to destroy it and migrate the pool"
+		}
+		return "re-run with " + strings.Join(flags, " ") + " to include"
 	}
 	if s.Target.Detail != "" {
 		return s.Target.Detail
 	}
 	return "left in place"
+}
+
+// unverifiedOtherFlavor reports an other-flavor worktree whose only obstacle
+// is the unverified class: nothing proved its work is unlanded, no lease or
+// live process claims it, verification in its own backend just failed, so the
+// honest framing for the opt-in flag is pool migration rather than discarding
+// unlanded or actively-claimed work.
+func unverifiedOtherFlavor(t pool.DestroyTarget) bool {
+	if !t.OtherFlavor {
+		return false
+	}
+	unverified := false
+	for _, class := range t.Classes {
+		switch class {
+		case pool.DestroyUnverified:
+			unverified = true
+		case pool.DestroyDirty, pool.DestroyUnmerged, pool.DestroyLeased, pool.DestroyInUse:
+			return false
+		}
+	}
+	return unverified
 }
 
 func destroyTag(t pool.DestroyTarget) string {

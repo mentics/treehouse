@@ -11,11 +11,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kunchenguid/treehouse/internal/config"
-	"github.com/kunchenguid/treehouse/internal/git"
 	"github.com/kunchenguid/treehouse/internal/pool"
 	"github.com/kunchenguid/treehouse/internal/process"
 	"github.com/kunchenguid/treehouse/internal/shell"
 	"github.com/kunchenguid/treehouse/internal/ui"
+	"github.com/kunchenguid/treehouse/internal/vcs"
 )
 
 var (
@@ -24,6 +24,14 @@ var (
 	getJSON           bool
 	getSubmodules     bool
 	getSubmodulesMode string
+	getNoFetch        bool
+	getBase           string
+)
+
+// Process seams, overridable in tests, matching the pattern in internal/pool.
+var (
+	terminateWorktreeProcesses     = process.TerminateWorktreeProcesses
+	unprotectedProcessesInWorktree = process.UnprotectedProcessesInWorktree
 )
 
 var getCmd = &cobra.Command{
@@ -39,7 +47,14 @@ never removed by prune, even with no process running inside it, until you releas
 it with 'treehouse return <path>'.
 
 Pass --submodules to prepare managed submodule worktrees at their real paths
-inside the acquired slot. Submodule pooling can also be enabled in treehouse.toml.`,
+inside the acquired slot. Submodule pooling can also be enabled in treehouse.toml.
+
+Worktrees are cut from the branch treehouse infers from the repository. Pass
+--base to cut this one from a different branch, or set base_branch in
+treehouse.toml to change it for the whole pool. The worktree is still handed
+over in detached HEAD; --base chooses the commit it starts at, it does not
+create or check out a branch. A base that cannot be resolved is an error, never
+a silent fall back to the inferred default.`,
 	RunE: getRunE,
 }
 
@@ -49,6 +64,9 @@ func init() {
 	getCmd.Flags().BoolVar(&getJSON, "json", false, "Print lease allocation as JSON (requires --lease)")
 	getCmd.Flags().BoolVar(&getSubmodules, "submodules", false, "Prepare managed submodule worktrees for the acquired slot")
 	getCmd.Flags().StringVar(&getSubmodulesMode, "submodules-mode", "", "Submodule depth: top (default) or recursive (not supported yet)")
+	getCmd.Flags().BoolVar(&getNoFetch, "no-fetch", false, "Skip fetching origin before acquiring; use existing local refs")
+	// No -b shorthand: git spells branch creation -b, and this creates nothing.
+	getCmd.Flags().StringVar(&getBase, "base", "", "Branch to cut this worktree from, overriding base_branch in config (default: inferred from the repository)")
 	rootCmd.AddCommand(getCmd)
 }
 
@@ -57,9 +75,13 @@ func getRunE(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--json requires --lease")
 	}
 
-	repoRoot, err := git.FindRepoRoot()
+	repoRoot, err := vcs.FindRepoRoot()
 	if err != nil {
-		return fmt.Errorf("not in a git repository: %w", err)
+		return fmt.Errorf("not in a git or jj repository: %w", err)
+	}
+	repoRoot, err = vcs.FindMainRepoRoot()
+	if err != nil {
+		return fmt.Errorf("not in a git or jj repository: %w", err)
 	}
 
 	cfg, err := config.Load(repoRoot)
@@ -71,13 +93,13 @@ func getRunE(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	poolDir, err := config.ResolvePoolDir(repoRoot, cfg.Root)
+	poolDir, err := config.ResolvePoolDir(repoRoot, config.ResolveRoot(rootFlag, cfg))
 	if err != nil {
 		return fmt.Errorf("failed to resolve pool directory: %w", err)
 	}
 
-	if err := config.EnsureGitignore(filepath.Dir(poolDir)); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to update .gitignore: %v\n", err)
+	if err := config.EnsureExcluded(filepath.Dir(poolDir)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to update git exclude: %v\n", err)
 	}
 
 	acquireOpts := buildAcquireOptions(cfg)
@@ -86,7 +108,7 @@ func getRunE(cmd *cobra.Command, args []string) error {
 		return getLeaseRunE(repoRoot, poolDir, cfg, acquireOpts)
 	}
 
-	wtPath, err := pool.Acquire(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, acquireOpts)
+	wtPath, err := pool.AcquireWithOptions(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, acquireOpts)
 	if err != nil {
 		return err
 	}
@@ -98,12 +120,17 @@ func getRunE(cmd *cobra.Command, args []string) error {
 	}
 	_, err = shell.Spawn(wtPath, env)
 
-	// Subshell exited — handle return
-	if err := git.DetachWorktree(wtPath); err != nil {
-		fmt.Fprintf(os.Stderr, "🌳 Warning: failed to detach worktree HEAD: %v\n", err)
+	// Subshell exited — handle return. A markerless slot must never be
+	// detached: dispatch on such a path falls back to the configured backend,
+	// which in an in-project pool would detach the HEAD of the repository
+	// ENCLOSING the pool.
+	if vcs.WorktreeBackendName(wtPath) != "" {
+		if err := vcs.DetachWorktree(wtPath); err != nil {
+			fmt.Fprintf(os.Stderr, "🌳 Warning: failed to detach worktree HEAD: %v\n", err)
+		}
 	}
 
-	if err := confirmAndReturnWorktree(poolDir, wtPath, acquireOpts); err != nil {
+	if err := confirmAndReturnWorktree(poolDir, wtPath, acquireOpts, cfg, repoRoot); err != nil {
 		return err
 	}
 
@@ -125,12 +152,14 @@ func buildAcquireOptions(cfg config.Config) pool.AcquireOptions {
 		subCfg.Mode = getSubmodulesMode
 	}
 	return pool.AcquireOptions{
+		SkipFetch:     getNoFetch,
+		BaseBranch:    resolveRequestedBase(cfg),
 		Submodules:    active,
 		SubmodulesCfg: subCfg,
 	}
 }
 
-func confirmAndReturnWorktree(poolDir, wtPath string, acquireOpts pool.AcquireOptions) error {
+func confirmAndReturnWorktree(poolDir, wtPath string, acquireOpts pool.AcquireOptions, cfg config.Config, repoRoot string) error {
 	dirty, _ := pool.RootDirtyForPool(poolDir, wtPath)
 	if dirty {
 		fmt.Fprintf(os.Stderr, "🌳 Worktree has uncommitted changes.\n")
@@ -156,15 +185,49 @@ func confirmAndReturnWorktree(poolDir, wtPath string, acquireOpts pool.AcquireOp
 		}
 	}
 
-	killLingeringProcesses(wtPath)
-
 	releaseOpts := pool.ReleaseOptions{Submodules: acquireOpts.Submodules}
-	if err := pool.Release(poolDir, wtPath, releaseOpts); err != nil {
-		fmt.Fprintf(os.Stderr, "🌳 Warning: failed to clean worktree: %v\n", err)
-	} else {
-		fmt.Fprintln(os.Stderr, "🌳 Worktree returned to pool.")
+	if err := returnWorktreeToPool(poolDir, wtPath, releaseBaseBranch(repoRoot, cfg), releaseOpts); err != nil {
+		fmt.Fprintf(os.Stderr, "🌳 Warning: %v; leaving worktree in place.\n", err)
+		return err
 	}
+	fmt.Fprintln(os.Stderr, "🌳 Worktree returned to pool.")
 	return nil
+}
+
+// returnWorktreeToPool terminates any lingering writers and resets the worktree
+// back into the pool as a single locked transaction: killLingeringProcesses runs
+// as the release's beforeReset step, under the same state lock and immediately
+// before the reset, so a writer that re-enters the worktree cannot slip between
+// the emptiness check and the destructive reset.
+func returnWorktreeToPool(poolDir, wtPath, baseBranch string, releaseOpts pool.ReleaseOptions) error {
+	return pool.ReleaseConditional(poolDir, wtPath, baseBranch, releaseOpts, pool.ReleasePreconditions{}, func() error {
+		return killLingeringProcesses(wtPath)
+	})
+}
+
+// resolveRequestedBase returns the base this invocation asks for: the --base
+// flag, then base_branch from config, then empty to infer it.
+func resolveRequestedBase(cfg config.Config) string {
+	if getBase != "" {
+		return getBase
+	}
+	return cfg.BaseBranch
+}
+
+// releaseBaseBranch returns the branch a returned worktree is parked on: the
+// configured base, or "" for the repository default. It reads config rather
+// than this invocation's --base because parking decides what the NEXT acquire
+// can recycle. An unresolvable base warns and falls back, so a typo cannot
+// strand the reservation; get reports it as a real error.
+func releaseBaseBranch(repoRoot string, cfg config.Config) string {
+	if cfg.BaseBranch == "" {
+		return ""
+	}
+	if err := vcs.VerifyBaseBranch(repoRoot, cfg.BaseBranch); err != nil {
+		fmt.Fprintf(os.Stderr, "🌳 Warning: cannot return the worktree to base branch %q (%v); using the repository default instead.\n", cfg.BaseBranch, err)
+		return ""
+	}
+	return cfg.BaseBranch
 }
 
 // getLeaseRunE performs a non-interactive, durable acquire. It writes either the
@@ -176,7 +239,7 @@ func getLeaseRunE(repoRoot, poolDir string, cfg config.Config, acquireOpts pool.
 		holder = os.Getenv("TREEHOUSE_LEASE_HOLDER")
 	}
 
-	lease, err := pool.AcquireLeaseInfo(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, holder, acquireOpts)
+	lease, err := pool.AcquireLeaseInfoWithOptions(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, holder, acquireOpts)
 	if err != nil {
 		return err
 	}
@@ -192,20 +255,40 @@ func getLeaseRunE(repoRoot, poolDir string, cfg config.Config, acquireOpts pool.
 }
 
 // killLingeringProcesses terminates any process whose cwd is within the given
-// worktree. Called before returning a worktree to the pool so detached tools
-// (e.g. opencode servers that ignore SIGHUP) don't keep holding the worktree.
-func killLingeringProcesses(wtPath string) {
-	killed, err := process.TerminateWorktreeProcesses(wtPath, 2*time.Second)
+// worktree, then verifies the worktree is clear before it is handed back to the
+// pool. Detached tools (e.g. opencode servers that ignore SIGHUP) are the usual
+// reason a worktree is not quiet on return.
+//
+// It returns an error when termination cannot be proven complete: a process
+// could not be signalled (e.g. an ancestry-lookup failure), or a live writer
+// remains after termination. The point-in-time selection inside
+// TerminateWorktreeProcesses signals only what a single scan saw, so a process
+// that started during the grace period is never targeted; the re-scan below
+// catches it. Failing here makes the caller leave the slot in place rather than
+// reset a worktree another process is still writing into.
+func killLingeringProcesses(wtPath string) error {
+	killed, err := terminateWorktreeProcesses(wtPath, 2*time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "🌳 Warning: failed to scan for lingering processes: %v\n", err)
-		return
+		return fmt.Errorf("could not terminate worktree processes: %w", err)
 	}
-	if len(killed) == 0 {
-		return
+	if len(killed) > 0 {
+		names := make([]string, len(killed))
+		for i, p := range killed {
+			names[i] = p.String()
+		}
+		fmt.Fprintf(os.Stderr, "🌳 Terminated lingering processes: %s\n", strings.Join(names, ", "))
 	}
-	names := make([]string, len(killed))
-	for i, p := range killed {
-		names[i] = p.String()
+
+	survivors, err := unprotectedProcessesInWorktree(wtPath)
+	if err != nil {
+		return fmt.Errorf("could not verify worktree processes stopped: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "🌳 Terminated lingering processes: %s\n", strings.Join(names, ", "))
+	if len(survivors) > 0 {
+		names := make([]string, len(survivors))
+		for i, p := range survivors {
+			names[i] = p.String()
+		}
+		return fmt.Errorf("worktree still has live processes after termination: %s", strings.Join(names, ", "))
+	}
+	return nil
 }

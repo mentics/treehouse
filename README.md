@@ -57,6 +57,14 @@ irm https://kunchenguid.github.io/treehouse/install.ps1 | iex
 
 ```sh
 nix run github:kunchenguid/treehouse
+# or pin a specific release tag:
+nix run github:kunchenguid/treehouse/v2.3.0
+```
+
+Install into your Nix profile:
+
+```sh
+nix profile add github:kunchenguid/treehouse
 ```
 
 Or add to your flake inputs:
@@ -67,6 +75,8 @@ treehouse = {
   inputs.nixpkgs.follows = "nixpkgs";
 };
 ```
+
+The flake exposes `#default` and `#treehouse` package outputs, plus `apps` for `nix run`.
 
 **Go**
 
@@ -86,6 +96,7 @@ make install
 
 Treehouse manages a **pool of git worktrees** per repository, stored under the configured treehouse root.
 The default treehouse root is `~/.treehouse/` (or `$TREEHOUSE_HOME` / `$TREEHOUSE_WORKTREES` when those env vars are set; see Configuration).
+You can instead keep the pool [inside the project](#in-project-storage) with `--root .`, so it lives next to the code and is removed with the project.
 
 ```
   treehouse
@@ -97,10 +108,11 @@ The default treehouse root is `~/.treehouse/` (or `$TREEHOUSE_HOME` / `$TREEHOUS
   git fetch origin
       │
       ▼
-  ┌───────────────────────────────────────┐
-  │  Scan pool for available worktree     │
-  │  (not leased, not in-use, not dirty)  │
-  └──────────┬────────────────────────────┘
+  ┌──────────────────────────────────────────────────────┐
+  │  Scan pool for a safely reusable worktree            │
+  │  (idle, unleased, clean, and HEAD merged into the    │
+  │  exact reset target; skip if safety is unprovable)   │
+  └──────────┬───────────────────────────────────────────┘
              │
         ┌────┴────┐
         │  Found? │
@@ -124,12 +136,15 @@ The default treehouse root is `~/.treehouse/` (or `$TREEHOUSE_HOME` / `$TREEHOUS
            │
            ▼
   Terminate lingering worktree
-  processes, reset worktree,
-  & return to pool
+  processes and verify none remain
+           │
+           ▼
+  Reset worktree & return to pool
   (ready for next agent)
 ```
 
 - **Detached HEAD** — worktrees use detached HEAD mode, reset to whichever of the local or remote default branch is further ahead, avoiding branch name conflicts entirely.
+- **Choosable base branch** — set `base_branch` in `treehouse.toml`, or pass `treehouse get --base <branch>`, to cut worktrees from a branch other than the repository default. Opt-in; unset keeps today's inference. Worktrees stay in detached HEAD — this selects the commit they start at, it does not create or check out a branch.
 - **No daemon** - all operations are inline CLI commands.
   Pool state is a small on-disk file, written under a lock by each command.
 - **In-use detection** — treehouse scans running processes and short-lived owner reservations to determine which worktrees are in-use. Reservations are persisted only while `get`, `destroy`, and `prune` lifecycle work is running.
@@ -141,6 +156,7 @@ The default treehouse root is `~/.treehouse/` (or `$TREEHOUSE_HOME` / `$TREEHOUS
   `treehouse prune --all` applies the same safety checks across every managed pool under the user-level treehouse root.
   Backing-repository-missing orphans are reported by default; `--prune-orphans` includes them as unverified prune candidates, and `--yes` is required before deletion.
   It is a dry run unless you pass `--yes`.
+- **Self-healing get** - `treehouse get` prunes stale git worktree bookkeeping (e.g. left behind by a crashed or forcibly removed worktree) before adding a new worktree, so a prunable registration never wedges the pool with a "missing but already registered worktree" error.
 
 ## CLI Reference
 
@@ -151,7 +167,7 @@ The default treehouse root is `~/.treehouse/` (or `$TREEHOUSE_HOME` / `$TREEHOUS
 | `treehouse get --lease`    | Durably lease a worktree without a subshell; print its path |
 | `treehouse enter <name>`   | Open a subshell in an existing worktree by name (the number from `status`), even if it is in use; pool state is left untouched |
 | `treehouse status`         | Show pool status (highlights leased and current worktrees) |
-| `treehouse return [path]`  | Release any lease, terminate lingering worktree processes, and return it to the pool |
+| `treehouse return [path]`  | Release any lease and return a worktree only after verifying foreign processes stopped |
 | `treehouse prune`          | Dry-run removal of stale idle worktrees in the current repo pool |
 | `treehouse prune --all`    | Dry-run removal of stale idle worktrees across every managed pool |
 | `treehouse destroy <path>` | Dry-run removal of one worktree (safe by default; `--yes` to execute) |
@@ -166,7 +182,8 @@ The default treehouse root is `~/.treehouse/` (or `$TREEHOUSE_HOME` / `$TREEHOUS
 | --------- | --------- | --------------------------------- |
 | `get`     | `--lease` | Durably lease the worktree without opening a subshell; print only its path to stdout |
 | `get`     | `--lease-holder` | Optional label recorded as the lease holder (defaults to `$TREEHOUSE_LEASE_HOLDER`) |
-| `get`     | `--json` | Print `path`, `lease_id`, `lease_holder`, and `leased_at` as JSON (requires `--lease`) |
+| `get`     | `--json` | Print `path`, `lease_id`, `lease_holder`, `leased_at`, and `base_branch` as JSON (requires `--lease`) |
+| `get`     | `--base` | Branch to cut this worktree from, overriding `base_branch` in config |
 | `enter`   | `--print-path` | Print only the worktree's absolute path to stdout instead of opening a subshell (for `cd "$(treehouse enter --print-path 1)"`) |
 | `status`  | `--json` | Print worktree status and lease metadata as JSON |
 | `return`  | `--force` | Clean, reset, and return without prompting |
@@ -206,12 +223,22 @@ Every acquisition receives a new random `lease_id`, including reacquiring the sa
 
 ```sh
 treehouse get --lease --lease-holder automation-A --json
-# {"path":"...","lease_id":"...","lease_holder":"automation-A","leased_at":"..."}
+# {"path":"...","lease_id":"...","lease_holder":"automation-A","leased_at":"...","base_branch":"main"}
 ```
 
-`treehouse status --json` returns an array with `name`, `path`, `status`, `lease_id`, `lease_holder`, `leased_at`, and `processes`. Non-leased entries use empty lease strings and a `null` timestamp. State files written before lease identities remain readable; their existing leases have an empty `lease_id` until released and acquired again.
+Callers that already fetched the required refs can avoid another network operation with `--no-fetch`:
 
-Release a lease with `treehouse return <path>`, which clears the lease, terminates any lingering processes, resets the worktree, and returns it to the pool.
+```sh
+git fetch origin main refs/pull/123/head
+treehouse get --lease --no-fetch --json
+```
+
+With `--no-fetch`, Treehouse resets or creates the worktree from existing local refs and never contacts `origin`. The caller is responsible for ensuring those refs and objects are current.
+
+`treehouse status --json` returns an array with `name`, `path`, `status`, `flavor`, `lease_id`, `lease_holder`, `leased_at`, and `processes`. `flavor` is the backend the worktree's own marker identifies (`"git"` or `"jj"`) and is omitted when no marker is found. Non-leased entries use empty lease strings and a `null` timestamp. State files written before lease identities remain readable; their existing leases have an empty `lease_id` until released and acquired again.
+
+Release a lease with `treehouse return <path>`, which terminates lingering processes and verifies that no foreign process remains before it resets the worktree, clears the lease, and returns the worktree to the pool.
+If process termination or that verification fails, the command exits nonzero and leaves the worktree and lease in place instead of recycling a slot that may still be in use.
 When you pass an explicit path, `treehouse return` can run from outside the repository because it resolves the managed pool from that worktree path.
 
 For retry-safe automation, condition the return on the identity from allocation or status:
@@ -244,9 +271,9 @@ Bulk `destroy --all` and prune leave recovered entries alone.
 By default, it lists stale idle managed worktrees that would be deleted and shows the reclaimable disk space.
 Pass `treehouse prune --yes` to delete those worktrees.
 
-By default, prune only inspects the current repository's pool and must be run inside a git repo.
+By default, prune only inspects the current repository's pool and must be run inside a repository.
 Pass `treehouse prune --all` or `treehouse prune --global` to inspect every managed pool under the user-level treehouse root from any directory.
-Global prune reads the user-level config and hooks, derives each worktree's owning repository from git metadata, then fetches and checks merge safety against that repository.
+Global prune reads the user-level config and hooks, derives each worktree's owning repository from version-control metadata, then fetches and checks merge safety against that repository.
 Without `--prune-orphans`, pass `treehouse prune --all --yes` to delete only the globally safe stale candidates.
 
 Prune ignores worktrees that are currently in use, leased, or reserved by another lifecycle operation.
@@ -258,8 +285,8 @@ If `origin` cannot be reached, prune reports `origin unreachable (cannot verify)
 If a linked worktree points at a missing backing repository, prune reports `orphaned (backing repository missing)`.
 Plain `treehouse prune` and `treehouse prune --all` never delete those orphans.
 Pass `--prune-orphans` to include true backing-repository-missing orphans in the dry run, then add `--yes` to delete them.
-Treehouse cannot verify orphan contents after the backing git metadata is gone, so each orphan candidate is marked `content could not be verified`.
-Use `--verbose` to show the underlying git diagnostic details for skipped worktrees.
+Treehouse cannot verify orphan contents after the backing version-control metadata is gone, so each orphan candidate is marked `content could not be verified`.
+Use `--verbose` to show the underlying version-control diagnostic details for skipped worktrees.
 
 ### Destroying worktrees
 
@@ -313,8 +340,18 @@ max_trees = 16
 # Optional worktree root directory.
 # Empty uses $HOME/.treehouse (or $TREEHOUSE_HOME / $TREEHOUSE_WORKTREES when set).
 # Relative paths are resolved from the repo root for repo-scoped commands.
+# Use "." to keep the pool inside the project (see "In-project storage" below).
 # Use an absolute user-level root for treehouse prune --all.
 # root = "$HOME/worktrees"
+
+# Optional base branch worktrees are cut from.
+# Unset infers it from the repository (see "Base branch" below).
+# base_branch = "develop"
+
+# Optional version-control backend. Git is the default everywhere; set "jj"
+# to opt in to the experimental Jujutsu backend
+# (see "Version-control backend" below).
+# vcs = "jj"
 ```
 
 ### Environment variables
@@ -339,6 +376,95 @@ treehouse env
 The repo-level config takes precedence for repo-safe settings.
 `treehouse prune --all` can run without a repository, so it uses only the user-level config and does not read per-repo `treehouse.toml` files while sweeping.
 If no config is found, the default pool size is 16.
+
+### Base branch
+
+By default Treehouse infers the branch worktrees are cut from: `origin/HEAD`, then the checked-out branch, then `init.defaultBranch`.
+That inference is invisible and can drift — `origin/HEAD` is only set at clone time, and some clones never have it at all.
+
+Set it explicitly for the whole pool:
+
+```toml
+base_branch = "develop"
+```
+
+or for a single acquisition:
+
+```sh
+treehouse get --base develop
+treehouse get --lease --base release/2.x --json
+```
+
+`--base` wins over `base_branch`, and both are opt-in: with neither set, the inference is unchanged.
+
+A few things worth knowing:
+
+- **Worktrees stay in detached HEAD.** This selects the commit a worktree starts at; it does not create or check out a branch. There is no `-b` shorthand, because `-b` means branch *creation* in git and this flag creates nothing.
+- **Branch names only.** `develop`, not `origin/develop`, a tag, or a commit SHA. Whichever of `develop` and `origin/develop` is further ahead wins, preferring `origin` when they have diverged — exactly how the inferred default behaves. A tag sharing a branch's name never wins: refs are resolved fully qualified.
+- **It fails closed.** A base that resolves to neither a local branch nor `origin/<branch>` is an error; Treehouse never falls back to the inferred default, which would hand you a worktree cut from the wrong branch and report success. `treehouse status` shows the resolved base, and flags a configured one it cannot resolve.
+- **Returned worktrees are parked on the base they were cut from**, so the pool keeps recycling. `base_branch` wins when it is set; otherwise a slot acquired with `--base` is parked back on that branch. A slot parked elsewhere could not be reused whenever the base is not a descendant of it.
+- **Existing pools migrate on their own.** A slot is recycled onto a newly requested base as long as it carries nothing beyond the base it was cut from; the two bases need no ancestry relation, so a `develop` slot rejoins a plain `treehouse get` and vice versa. A slot holding commits the new base does not contain is still refused, as always.
+- **Git backend only for now.** Under the jj backend an explicit base fails with a clear error rather than silently using the default bookmark.
+
+### Version-control backend (git or Jujutsu)
+
+Treehouse works in git and [Jujutsu (jj)](https://github.com/jj-vcs/jj) repositories.
+**The jj backend is experimental**: it is newer than the git backend and has seen far less production use, so treat it accordingly and report issues.
+In a jj repository, pooled worktrees are [jj workspaces](https://jj-vcs.github.io/jj/latest/working-copy/#workspaces) instead of git worktrees; the pool, lease, and safety machinery is identical.
+
+Git is the default backend everywhere, including in colocated repositories (both `.jj` and `.git`) and `.jj`-only repositories.
+Opt in to the jj backend with `vcs = "jj"`, resolved in this precedence (highest first): the `TREEHOUSE_VCS` environment variable, the repo-level `treehouse.toml`, the user-level `~/.config/treehouse/config.toml`.
+The jj opt-in only applies where a `.jj` directory actually exists; in a plain git repository it is silently ignored and git is used, so a shell-wide `TREEHOUSE_VCS=jj` never breaks git-only repositories.
+A `vcs` value other than `"git"` or `"jj"` (e.g. `"Jujutsu"`) is ignored the same way, but warns once on stderr naming the value and where it came from, so a typo keeps commands working without silently leaving you on the wrong backend.
+Pooled jj workspaces inherit the opt-in from their main repository root, so an untracked `treehouse.toml` there is enough.
+
+The backend is resolved on every command, and existing pool slots keep the flavor they were created with: changing the opt-in does not convert worktrees already in the pool.
+`destroy` and `prune` handle each slot by its own flavor (its `.git` or `.jj` marker), so a git worktree is still cleanly deregistered from git even after opting the repository into jj, and vice versa.
+A slot whose marker is missing entirely (a damaged slot) is never reused, reset, or detached; `treehouse status` reports it as `damaged`, `treehouse return` only clears its lease, `prune` reports it as unverifiable, and `treehouse destroy <path> --include-unlanded` removes it.
+`treehouse get` is flavor-aware too: it only reuses slots matching the backend the repository currently selects, and creates new slots with that backend, so a caller who opted in to jj is never handed a git worktree (or vice versa).
+Old-flavor slots stay in the pool untouched — `treehouse status` marks them and they count toward `max_trees` — until you migrate them: `treehouse destroy` the old slots and re-acquire with `treehouse get`.
+
+jj-backend notes:
+
+- Pooled worktrees are jj workspaces and are not colocated: they contain `.jj` but no `.git`, so run jj commands (not git) inside them.
+- A worktree is considered dirty when its working-copy commit `@` is non-empty or has a description.
+- Resets abandon only the working-copy commit and are recoverable with `jj op restore`.
+- Merge detection uses ancestry; squash-merged work is treated as unmerged, so lifecycle commands err on the side of keeping it.
+- The default branch resolves to the `main`/`master`/`trunk` bookmark, preferring origin.
+- A pooled jj workspace whose backing repository was deleted is classified as an orphan just like a git worktree: `prune` reports it, and `prune --prune-orphans --yes` reclaims it.
+
+### Worktree root
+
+The worktree root can also be set without a config file, and the resolved value follows this precedence (highest first):
+
+1. The `--root` flag (e.g. `treehouse get --root .`)
+2. The `TREEHOUSE_ROOT` environment variable
+3. `root` in the repo-level `treehouse.toml`
+4. `root` in the user-level `~/.config/treehouse/config.toml`
+5. The default, `~/.treehouse`
+
+A relative value (including `.`) is resolved from the repo root, exactly like a relative `root` in config; `treehouse` is always appended, so `--root .` places the pool at `<repo>/.treehouse/`.
+
+### In-project storage
+
+By default the pool lives in the global `~/.treehouse` store. Set the root to `.` to keep it **inside the project** instead:
+
+```sh
+treehouse get --root .          # one-off
+export TREEHOUSE_ROOT=.         # for a shell session
+```
+
+or commit it for the whole repo in `treehouse.toml`:
+
+```toml
+root = "."
+```
+
+This is **opt-in**; the default global store is unchanged. In-project mode:
+
+- Places the pool at `<repo>/.treehouse/`, so worktrees sit next to the code and are **removed with the project** (`rm -rf <repo>` leaves no global orphan).
+- Git-ignores the pool directory automatically, so it stays out of `git add`.
+- Is not reached by `treehouse prune --all`, which only sweeps the global root; in-project pools are removed with the project instead.
 
 ### Hooks
 

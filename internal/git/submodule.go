@@ -145,3 +145,15 @@ func ResetWorktreeToRef(worktreePath, ref string) error {
 func HeadCommit(worktreePath string) (string, error) {
 	return runGit(worktreePath, "rev-parse", "HEAD")
 }
+
+// RemoveWorktree removes a git worktree, forcing deletion when needed.
+func RemoveWorktree(repoRoot, path string) error {
+	_, err := runGit(repoRoot, "worktree", "remove", "--force", path)
+	return err
+}
+
+// RemoveCleanWorktree removes a clean git worktree without forcing deletion.
+func RemoveCleanWorktree(repoRoot, path string) error {
+	_, err := runGit(repoRoot, "worktree", "remove", path)
+	return err
+}

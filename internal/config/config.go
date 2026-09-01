@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/BurntSushi/toml"
-	"github.com/kunchenguid/treehouse/internal/git"
+	"github.com/kunchenguid/treehouse/internal/vcs"
 )
 
 const (
@@ -17,6 +17,8 @@ const (
 type Config struct {
 	MaxTrees   int              `toml:"max_trees"`
 	Root       string           `toml:"root"`
+	BaseBranch string           `toml:"base_branch,omitempty"`
+	VCS        string           `toml:"vcs,omitempty"`
 	Hooks      Hooks            `toml:"hooks,omitempty"`
 	Submodules SubmodulesConfig `toml:"submodules,omitempty"`
 }
@@ -26,10 +28,32 @@ type Hooks struct {
 	PreDestroy []string `toml:"pre_destroy,omitempty"`
 }
 
+// RootEnvVar is the environment variable that overrides the configured
+// worktree root. It sits below the --root flag but above repo/user config in
+// the resolution precedence (see ResolveRoot).
+const RootEnvVar = "TREEHOUSE_ROOT"
+
 func DefaultConfig() Config {
 	return Config{
 		MaxTrees: 16,
 	}
+}
+
+// ResolveRoot returns the effective worktree root, honoring override precedence:
+// an explicit flag value, then the TREEHOUSE_ROOT environment variable, then the
+// root from repo/user config, then the built-in default (empty string, which
+// ResolvePoolRoot maps to ~/.treehouse). It keeps ResolvePoolRoot pure while
+// letting callers layer command-line and environment overrides on top of the
+// loaded config. A relative override is resolved from the repo root exactly like
+// a relative config root, so `--root .` selects an in-project pool.
+func ResolveRoot(flagRoot string, cfg Config) string {
+	if flagRoot != "" {
+		return flagRoot
+	}
+	if env := os.Getenv(RootEnvVar); env != "" {
+		return env
+	}
+	return cfg.Root
 }
 
 func Load(repoRoot string) (Config, error) {
@@ -154,13 +178,13 @@ func DataDir() (string, error) {
 func ResolvePoolDir(repoRoot string, root string) (string, error) {
 	// Use remote URL for the hash when available; fall back to the
 	// absolute repo path for purely-local repositories.
-	hashInput, err := git.GetRemoteURL(repoRoot)
+	hashInput, err := vcs.GetRemoteURL(repoRoot)
 	if err != nil {
 		hashInput = repoRoot
 	}
 
 	repoName := filepath.Base(repoRoot)
-	shortHash := git.ShortHash(hashInput)
+	shortHash := vcs.ShortHash(hashInput)
 	poolName := repoName + "-" + shortHash
 
 	poolRoot, err := ResolvePoolRoot(repoRoot, root)

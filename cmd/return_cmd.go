@@ -9,9 +9,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kunchenguid/treehouse/internal/config"
-	"github.com/kunchenguid/treehouse/internal/git"
 	"github.com/kunchenguid/treehouse/internal/pool"
 	"github.com/kunchenguid/treehouse/internal/ui"
+	"github.com/kunchenguid/treehouse/internal/vcs"
 )
 
 var (
@@ -62,14 +62,16 @@ var returnCmd = &cobra.Command{
 				err = confirmWorktreeReturn(poolDir, wtPath)
 			}
 			if err == nil {
-				err = pool.ReleaseConditional(poolDir, wtPath, preconditions, releaseOpts, func() error {
+				err = pool.ReleaseConditional(poolDir, wtPath, returnBaseBranch(wtPath), releaseOpts, preconditions, func() error {
 					return finalizeWorktreeReturn(wtPath)
 				})
 			}
 		} else {
-			err = prepareWorktreeReturn(poolDir, wtPath)
+			err = confirmWorktreeReturn(poolDir, wtPath)
 			if err == nil {
-				err = pool.Release(poolDir, wtPath, releaseOpts)
+				err = pool.ReleaseConditional(poolDir, wtPath, returnBaseBranch(wtPath), releaseOpts, pool.ReleasePreconditions{}, func() error {
+					return finalizeWorktreeReturn(wtPath)
+				})
 			}
 		}
 		if errors.Is(err, errReturnAborted) {
@@ -90,13 +92,6 @@ func init() {
 	returnCmd.Flags().StringVar(&returnIfLeaseID, "if-lease-id", "", "Return only if the current lease has this identity")
 	returnCmd.Flags().StringVar(&returnIfLeaseHolder, "if-lease-holder", "", "Return only if the current lease has this holder")
 	rootCmd.AddCommand(returnCmd)
-}
-
-func prepareWorktreeReturn(poolDir, wtPath string) error {
-	if err := confirmWorktreeReturn(poolDir, wtPath); err != nil {
-		return err
-	}
-	return finalizeWorktreeReturn(wtPath)
 }
 
 func confirmWorktreeReturn(poolDir, wtPath string) error {
@@ -121,14 +116,16 @@ func confirmWorktreeReturn(poolDir, wtPath string) error {
 }
 
 func finalizeWorktreeReturn(wtPath string) error {
-	if !returnForce {
-		if err := git.DetachWorktree(wtPath); err != nil {
+	// A markerless slot must never be detached: dispatch on such a path falls
+	// back to the configured backend, which in an in-project pool would detach
+	// the HEAD of the repository ENCLOSING the pool.
+	if !returnForce && vcs.WorktreeBackendName(wtPath) != "" {
+		if err := vcs.DetachWorktree(wtPath); err != nil {
 			return fmt.Errorf("failed to detach worktree HEAD: %w", err)
 		}
 	}
 
-	killLingeringProcesses(wtPath)
-	return nil
+	return killLingeringProcesses(wtPath)
 }
 
 func resolveWorktreePath(args []string) (string, error) {
@@ -139,6 +136,28 @@ func resolveWorktreePath(args []string) (string, error) {
 		return filepath.Abs(env)
 	}
 	return os.Getwd()
+}
+
+// returnBaseBranch resolves the configured base branch for the repository that
+// owns wtPath, so a worktree returned by 'treehouse return' is parked exactly
+// where 'treehouse get' leaves one. Anything it cannot resolve yields "", the
+// repository default, because a return must never fail over configuration.
+func returnBaseBranch(wtPath string) string {
+	if vcs.WorktreeBackendName(wtPath) == "" {
+		// Damaged slot: it is never reset, so the branch is unused, and
+		// resolving through the fallback would answer for the repository
+		// enclosing an in-project pool.
+		return ""
+	}
+	repoRoot, err := vcs.FindMainRepoRootFrom(wtPath)
+	if err != nil {
+		return ""
+	}
+	cfg, err := config.Load(repoRoot)
+	if err != nil {
+		return ""
+	}
+	return releaseBaseBranch(repoRoot, cfg)
 }
 
 func resolveReturnPoolDir(wtPath string, explicitPath bool) (string, error) {
@@ -153,15 +172,15 @@ func resolveReturnPoolDir(wtPath string, explicitPath bool) (string, error) {
 
 	var repoRoot string
 	if explicitPath {
-		repoRoot, err = git.FindMainRepoRootFrom(wtPath)
+		repoRoot, err = vcs.FindMainRepoRootFrom(wtPath)
 	} else {
-		repoRoot, err = git.FindRepoRoot()
+		repoRoot, err = vcs.FindMainRepoRoot()
 	}
 	if err != nil {
 		if explicitPath {
 			return "", errReturnWorktreeUnmanaged
 		}
-		return "", fmt.Errorf("not in a git repository: %w", err)
+		return "", fmt.Errorf("not in a git or jj repository: %w", err)
 	}
 
 	cfg, err := config.Load(repoRoot)
@@ -169,7 +188,7 @@ func resolveReturnPoolDir(wtPath string, explicitPath bool) (string, error) {
 		return "", fmt.Errorf("failed to load config: %w", err)
 	}
 
-	fallbackPoolDir, err := config.ResolvePoolDir(repoRoot, cfg.Root)
+	fallbackPoolDir, err := config.ResolvePoolDir(repoRoot, config.ResolveRoot(rootFlag, cfg))
 	if err != nil {
 		return "", err
 	}

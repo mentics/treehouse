@@ -200,6 +200,70 @@ func TestReconcileSubmodules_CreatesChildWorktree(t *testing.T) {
 	}
 }
 
+func TestAcquireReusesSlotWithWarmSubmoduleCache(t *testing.T) {
+	base := t.TempDir()
+	subRemote := filepath.Join(base, "sub-remote.git")
+	subDir := filepath.Join(base, "sub")
+	superDir := filepath.Join(base, "super")
+	poolDir := filepath.Join(base, "pool")
+
+	mustGitPool(t, "", "init", "--bare", "--initial-branch=main", subRemote)
+	mustGitPool(t, "", "clone", subRemote, subDir)
+	mustGitPool(t, subDir, "config", "user.email", "t@t.com")
+	mustGitPool(t, subDir, "config", "user.name", "T")
+	if err := os.WriteFile(filepath.Join(subDir, "f.go"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGitPool(t, subDir, "add", ".")
+	mustGitPool(t, subDir, "commit", "-m", "sub")
+	subCommit := mustGitPool(t, subDir, "rev-parse", "HEAD")
+	mustGitPool(t, subDir, "push", "origin", "main")
+
+	mustGitPool(t, "", "init", "--initial-branch=main", superDir)
+	mustGitPool(t, superDir, "config", "user.email", "t@t.com")
+	mustGitPool(t, superDir, "config", "user.name", "T")
+	if err := os.WriteFile(filepath.Join(superDir, "README.md"), []byte("s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGitPool(t, superDir, "add", ".")
+	mustGitPool(t, superDir, "commit", "-m", "super")
+	gitmodules := "[submodule \"lib\"]\n\tpath = vendor/lib\n\turl = " + subRemote + "\n"
+	if err := os.WriteFile(filepath.Join(superDir, ".gitmodules"), []byte(gitmodules), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGitPool(t, superDir, "update-index", "--add", "--cacheinfo", "160000,"+subCommit+",vendor/lib")
+	mustGitPool(t, superDir, "add", ".gitmodules")
+	mustGitPool(t, superDir, "commit", "-m", "add sub")
+	mustGitPool(t, superDir, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "vendor/lib")
+
+	opts := AcquireOptions{
+		Submodules:    true,
+		SubmodulesCfg: config.SubmodulesConfig{Enabled: true, Fetch: config.SubmoduleFetchNever},
+		SkipFetch:     true,
+	}
+	first, err := AcquireWithOptions(superDir, poolDir, 4, nil, opts)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	cacheFile := filepath.Join(first, "vendor", "lib", ".warm-cache")
+	if err := os.WriteFile(cacheFile, []byte("warm\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(poolDir, first, ReleaseOptions{Submodules: true}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	second, err := AcquireWithOptions(superDir, poolDir, 4, nil, opts)
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	if second != first {
+		t.Fatalf("expected slot reuse, got %s then %s", first, second)
+	}
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("warm cache missing: %v", err)
+	}
+}
+
 func mustGitPool(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)

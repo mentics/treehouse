@@ -2,6 +2,7 @@
 treehouse
 treehouse.exe
 result
+result-*
 dist/
 
 # IDE
@@ -9,6 +10,7 @@ dist/
 .vscode/
 *.swp
 *.swo
+.serena/
 
 # OS
 .DS_Store
@@ -16,3 +18,7 @@ Thumbs.db
 
 # Test
 coverage.out
+.no-mistakes/evidence/
+
+# Local agent session logs (written by Claude Code hooks)
+/logs/

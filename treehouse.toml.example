@@ -5,6 +5,31 @@
 # Maximum number of worktrees in the pool
 max_trees = 16
 
+# Optional worktree root directory.
+# Empty (default) uses the global $HOME/.treehouse store.
+# Relative paths resolve from the repo root; "treehouse" is always appended.
+# Override per-command with the --root flag or the TREEHOUSE_ROOT env var
+# (precedence: --root > TREEHOUSE_ROOT > this file > user config > default).
+# Set to "." to keep the pool in-project at <repo>/.treehouse/, next to the
+# code and removed with the project.
+# root = "."
+
+# Optional base branch: the branch new and recycled worktrees are cut from.
+# Unset (default) infers it from the repository, unchanged from before:
+# origin/HEAD, then the checked-out branch, then init.defaultBranch.
+# When set, the branch must exist locally or on origin -- treehouse fails
+# closed instead of quietly falling back to the inferred default.
+# Whichever of <branch> and origin/<branch> is further ahead wins, preferring
+# origin when they have diverged, exactly as the inferred default behaves.
+# Override per-command with the --base flag.
+# base_branch = "develop"
+
+# Version-control backend selection. Git is the default everywhere. Set
+# "jj" to opt in to the experimental Jujutsu backend for this repository
+# (or per-command with TREEHOUSE_VCS=jj). Pooled jj workspaces inherit this
+# opt-in from the main repository root.
+# vcs = "jj"
+
 # Lifecycle hooks are ignored in repo-level config for safety.
 # Each list runs sequentially in the worktree directory via the OS shell.
 # Failures are logged and do not fail the operation.
