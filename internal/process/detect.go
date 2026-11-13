@@ -2,6 +2,7 @@ package process
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -52,6 +53,8 @@ func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
 		return nil, err
 	}
 
+	worktreeInfo, worktreeStatErr := os.Stat(absWorktree)
+
 	var result []ProcessInfo
 
 	for _, p := range procs {
@@ -59,7 +62,8 @@ func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
 		if err != nil {
 			continue
 		}
-		if !cwdWithinWorktree(absWorktree, cwd) {
+		if !cwdWithinWorktree(absWorktree, cwd) &&
+			(worktreeStatErr != nil || !cwdWithinWorktreeByIdentity(worktreeInfo, cwd)) {
 			continue
 		}
 		name, _ := p.Name()
@@ -102,6 +106,25 @@ func cwdWithinWorktree(absWorktree, cwd string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// cwdWithinWorktreeByIdentity reports whether cwd or one of its ancestors is the
+// same directory as the worktree root. It catches a worktree reached through a
+// path that symlink resolution cannot map back, such as a bind mount of it.
+func cwdWithinWorktreeByIdentity(worktree os.FileInfo, cwd string) bool {
+	if cwd == "" || !filepath.IsAbs(cwd) {
+		return false
+	}
+	for dir := filepath.Clean(cwd); ; {
+		if info, err := os.Stat(dir); err == nil && os.SameFile(worktree, info) {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 // pathInWorktree reports whether absPath is the worktree root or a descendant.

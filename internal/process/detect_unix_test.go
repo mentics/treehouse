@@ -10,6 +10,39 @@ import (
 	"time"
 )
 
+// An alias path that is not textually under the worktree (a bind mount in
+// production; a symlink here) still matches by directory identity.
+func TestCwdWithinWorktreeByIdentity_MatchesAliasPath(t *testing.T) {
+	base := t.TempDir()
+	worktree := filepath.Join(base, "wt")
+	if err := os.MkdirAll(filepath.Join(worktree, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(worktree, alias); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(base, "other")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, cwd := range []string{alias, filepath.Join(alias, "sub")} {
+		if !cwdWithinWorktreeByIdentity(info, cwd) {
+			t.Errorf("expected %s to match worktree by identity", cwd)
+		}
+	}
+	for _, cwd := range []string{other, base, "", "relative"} {
+		if cwdWithinWorktreeByIdentity(info, cwd) {
+			t.Errorf("expected %q not to match worktree", cwd)
+		}
+	}
+}
+
 // FindProcessesInWorktree should match a process whose cwd resolves to the
 // same real path as the worktree, even when the caller passes a symlinked
 // worktree path. This also covers macOS /tmp -> /private/tmp.
