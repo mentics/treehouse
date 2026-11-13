@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kunchenguid/treehouse/internal/config"
+	"github.com/kunchenguid/treehouse/internal/git"
 	"github.com/kunchenguid/treehouse/internal/pool"
 	"github.com/kunchenguid/treehouse/internal/ui"
 	"github.com/kunchenguid/treehouse/internal/vcs"
@@ -39,6 +40,15 @@ var returnCmd = &cobra.Command{
 		}
 
 		poolDir, err := resolveReturnPoolDir(wtPath, len(args) > 0)
+		if errors.Is(err, errReturnWorktreeUnmanaged) {
+			// A path inside a slot (a subdirectory or a pooled submodule) names
+			// the slot that contains it.
+			if root, rootErr := git.OutermostWorktreeRoot(wtPath); rootErr == nil && root != wtPath {
+				if rootPoolDir, rootPoolErr := resolveReturnPoolDir(root, true); rootPoolErr == nil {
+					wtPath, poolDir, err = root, rootPoolDir, nil
+				}
+			}
+		}
 		if err != nil {
 			if errors.Is(err, errReturnWorktreeUnmanaged) {
 				return fmt.Errorf("worktree %s is not managed by treehouse", wtPath)

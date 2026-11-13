@@ -165,6 +165,36 @@ func TestGetSubmodules_WarmReusePreservesCache(t *testing.T) {
 	}
 }
 
+func TestReturnSubmodules_FromInsideSubmoduleReturnsSlot(t *testing.T) {
+	superDir, homeDir, _, _ := setupSuperprojectWithSubmodules(t)
+
+	stdout, stderr, code := runTreehouse(t, superDir, homeDir, nil, "get", "--lease", "--submodules")
+	if code != 0 {
+		t.Fatalf("get --lease --submodules failed (code %d): %s", code, stderr)
+	}
+	wtPath := strings.TrimSpace(stdout)
+	childPath := filepath.Join(wtPath, "vendor", "libfoo")
+
+	_, returnErr, code := runTreehouseFromDir(t, superDir, childPath, homeDir, nil, "return")
+	if code != 0 {
+		t.Fatalf("return from inside submodule failed (code %d): %s", code, returnErr)
+	}
+
+	_, returnErr, code = runTreehouse(t, superDir, homeDir, nil, "get", "--lease", "--submodules")
+	if code != 0 {
+		t.Fatalf("re-acquire failed (code %d): %s", code, returnErr)
+	}
+	_, returnErr, code = runTreehouse(t, superDir, homeDir, nil, "return", childPath)
+	if code != 0 {
+		t.Fatalf("return with submodule path failed (code %d): %s", code, returnErr)
+	}
+
+	statusOut, _, _ := runTreehouse(t, superDir, homeDir, nil, "status")
+	if strings.Contains(statusOut, "leased") {
+		t.Fatalf("expected slot to be available after return, got:\n%s", statusOut)
+	}
+}
+
 func TestGetSubmodules_ConfigEnabled(t *testing.T) {
 	superDir, homeDir, _, subCommit := setupSuperprojectWithSubmodules(t)
 	writeSubmoduleUserConfig(t, homeDir)

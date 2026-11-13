@@ -96,6 +96,22 @@ func HasTrackedChanges(worktreePath string) (bool, error) {
 	return false, nil
 }
 
+// OutermostWorktreeRoot returns the working tree root containing dir, climbing
+// out of submodules to the outermost superproject.
+func OutermostWorktreeRoot(dir string) (string, error) {
+	root, err := FindRepoRootFrom(dir)
+	if err != nil {
+		return "", err
+	}
+	for {
+		super, err := runGit(root, "rev-parse", "--show-superproject-working-tree")
+		if err != nil || super == "" || super == root {
+			return root, nil
+		}
+		root = super
+	}
+}
+
 func runGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	if dir != "" {
